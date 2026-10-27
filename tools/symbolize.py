@@ -41,7 +41,7 @@ def find_addr2line(prefixes):
             tried.append(name)
         path = shutil.which(name)
         if path:
-            return path, name, tried
+            return path, name
     raise ToolError(
         "no addr2line found; tried " + ", ".join(tried)
         + "\n  install the RISC-V binutils, put them on PATH, or pass "
@@ -153,7 +153,7 @@ def main(argv=None):
             default_elf = args.elf
         else:
             default_elf = os.path.join(args.root, "kernel", "kernel")
-        addr2line, name, tried = find_addr2line(candidates(args.toolprefix))
+        addr2line, name = find_addr2line(candidates(args.toolprefix))
         items = [parse_item(a) for a in args.addresses]
         items += [("kernel", parse_address(a, a)) for a in args.kernel]
         if not items:

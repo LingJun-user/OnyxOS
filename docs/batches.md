@@ -359,7 +359,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | --- | --- |
 | `tools/onyxfs.py` | `ls` / `cat` / `stat` / `fsck` / `put`，`--json` |
 | `tools/symbolize.py` | `0x...`、`文件:地址`、stdin → `<prefix>addr2line -f -C -e <elf>` |
-| `test-tools.py` | `unittest`：布局推导、坏 magic/旧 magic、截断、脏日志、位图泄漏、inode 越界、`put` 前后一致性、头解析失败、符号化；`--qemu` 追加一次客户机回读 |
+| `test-tools.py` | `unittest`：布局推导、坏 magic/旧 magic、截断、脏日志、位图泄漏、inode 越界、`put` 前后一致性与文件模式、头解析失败、符号化；`--qemu` 追加一次客户机回读 |
 
 **布局常量不硬编码**
 
@@ -382,7 +382,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 
 **`put` 的安全边界**
 
-`put` 先跑一次 `fsck`，不干净直接拒绝；然后**在内存里**分配 inode 与数据块、写间接块、往根目录找空槽或扩展目录、置位图，再对重建后的 bytearray 完整跑一次 `fsck`，只有仍然干净才落盘。落盘用同目录临时文件 + `fsync` + `os.replace`，失败时删掉临时文件、原镜像不动。因此"拒绝"和"失败"都不会留下半写状态，`test-tools.py` 用逐字节 hash 断言这一点。
+`put` 先跑一次 `fsck`，不干净直接拒绝；然后**在内存里**分配 inode 与数据块、写间接块、往根目录找空槽或扩展目录、置位图，再对重建后的 bytearray 完整跑一次 `fsck`，只有仍然干净才落盘。落盘用同目录临时文件 + `fsync` + `os.replace`，并保留原镜像的文件模式（`mkstemp` 默认 0600），失败时删掉临时文件、原镜像不动。因此"拒绝"和"失败"都不会留下半写状态，`test-tools.py` 用逐字节 hash 断言这一点。
 
 限制是刻意的：只写根目录、只加普通文件、不覆盖同名文件、不支持目录/设备/硬链接；模式固定 `0644`、属主 `uid 0`；单文件不超过 `MAXFILE * BSIZE`，名字不超过 `DIRSIZ` 字节。运行中的 QEMU 持有旧 inode，所以替换后客户的写入落在旧镜像上，约定先退出 QEMU 再 `put`。
 
@@ -400,8 +400,8 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `make mkfs/mkfs kernel/kernel fs.img` | 通过，3200 块 / 47 元数据块 |
 | `python3 test-harness.py` | 21 项通过 |
 | `python3 test-auth.py` | 1 项通过 |
-| `python3 test-tools.py` | 29 项通过，约 4.5 秒 |
-| `python3 test-tools.py --qemu` | 30 项通过，约 5.7 秒（含一次客户机启动与 `cat` 回读） |
+| `python3 test-tools.py` | 30 项通过，约 5.9 秒 |
+| `python3 test-tools.py --qemu` | 31 项通过，约 7.2 秒（含一次客户机启动与 `cat` 回读） |
 | `python3 tools/onyxfs.py fsck fs.img` | 退出码 0，`clean` |
 | `python3 tools/symbolize.py --kernel 0x80000af2` | `panic at ./kernel/printk.c:231` |
 | `python3 test-shell.py --cpus 1` | syntax / memory / append / jobs 全部 PASS |

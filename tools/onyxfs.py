@@ -469,8 +469,9 @@ class Image:
         elif count:
             findings.error(
                 "log",
-                f"{count} committed log blocks are pending; the image is not "
-                "clean (boot the guest to recover it, then retry)")
+                f"{count} committed log block"
+                f"{'' if count == 1 else 's'} pending; boot the guest to "
+                "recover the image before touching it")
 
     def _fsck_bitmap(self, findings, nmeta):
         layout, sb = self.layout, self.sb
@@ -495,7 +496,8 @@ class Image:
         return (self.data[base] >> (block % 8)) & 1
 
     def _fsck_inodes(self, findings, used, nmeta):
-        layout, sb = self.layout, self.sb
+        layout = self.layout
+        nlink_max = layout.const("NLINK_MAX")
         reachable = {}
         for inum, dinode in self.inodes():
             where = f"inode {inum}"
@@ -505,7 +507,7 @@ class Image:
             if dinode["nlink"] == 0:
                 findings.error("inode", f"{where}: type {dinode['type']} with "
                                          "nlink 0 (orphan)")
-            if dinode["nlink"] > self.layout.const("NLINK_MAX"):
+            if dinode["nlink"] > nlink_max:
                 findings.error("inode", f"{where}: nlink {dinode['nlink']} "
                                          "exceeds NLINK_MAX")
             if dinode["size"] > layout.maxfile * layout.bsize:
@@ -877,11 +879,15 @@ def add_file(image_path, host_path, name=None, root=ROOT):
     fd, temporary = tempfile.mkstemp(
         dir=os.path.dirname(os.path.abspath(image_path)) or ".",
         prefix=os.path.basename(image_path) + ".", suffix=".tmp")
+    # mkstemp creates 0600; a replaced fs.img must keep the mode mktemp gave
+    # it, or the next make/QEMU run sees a file only its owner can open.
+    mode = os.stat(image_path).st_mode & 0o7777
     try:
         with os.fdopen(fd, "wb") as out:
             out.write(builder.data)
             out.flush()
             os.fsync(out.fileno())
+            os.fchmod(out.fileno(), mode)
         os.replace(temporary, image_path)
     except BaseException:
         try:

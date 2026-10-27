@@ -291,6 +291,13 @@ class PutTests(Workspace):
         leftovers = sorted(p.name for p in self.tmp.iterdir())
         self.assertEqual(leftovers, sorted([*self.files, "note.txt", "fs.img"]))
 
+    def test_put_keeps_the_image_file_mode(self):
+        os.chmod(self.image, 0o640)
+        source = self.tmp / "note.txt"
+        source.write_bytes(b"x")
+        self.assertEqual(self.put(source).returncode, 0)
+        self.assertEqual(self.image.stat().st_mode & 0o777, 0o640)
+
     def test_put_accepts_a_file_that_needs_the_indirect_block(self):
         layout = onyxfs.Layout(ROOT)
         source = self.tmp / "big.bin"
