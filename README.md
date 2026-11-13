@@ -55,7 +55,7 @@ OnyxOS/
 
 - `sh.c`：Shell，内建 `cd`、`jobs`、`fg PGID`、`bg PGID`、`exit`，支持前台/后台进程组。
 - OnyxOS 新增的命令与自检程序：见下方[常用命令](#常用命令)。
-- 镜像内置 **45** 个用户程序，完整清单见 `Makefile` 的 `UPROGS`。
+- 镜像内置 **47** 个用户程序，完整清单见 `Makefile` 的 `UPROGS`。
 
 ---
 
@@ -121,6 +121,8 @@ QEMU 默认参数为 `-m 128M -smp 3`，可用 `make qemu CPUS=1` 改变 hart �
 | `mmaptest` | 映射、按需加载、COW 与资源回收自检 |
 | `mixstress` | fork/wait、管道、COW、文件操作的组合压力测试 |
 | `fslimit [n]` | 目录与容量边界自检：跨间接块、上限推导、inode / 块耗尽与名字截断 |
+| `trace [-f] [-o file] [-e call,...] command` | 系统调用飞行记录：按 pid/ppid 打印参数、路径与返回值；`-p PID` 附着到已有进程 |
+| `tracetest` | 飞行记录器自检：失败调用、ppid、按 pid 附着、关闭、权限过滤与回绕 |
 
 ---
 
@@ -174,6 +176,7 @@ cat addresses.txt | python3 tools/symbolize.py   # 也可从 stdin 读
 | 口令认证登录 | `login` / `passwd` / `whoami` |
 | 虚拟内存映射 | `mmap()` / `munmap()` → `mmaptest` |
 | 目录与容量边界 | `fsinfo()` 会计 + 边界断言 → `fslimit` |
+| 系统调用飞行记录与 panic 现场 | `tracectl()` / `traceread()` → `trace` / `tracetest` |
 | 宿主镜像工具与符号化 | `tools/onyxfs.py`（`ls`/`cat`/`stat`/`fsck`/`put`）、`tools/symbolize.py` → `test-tools.py` |
 
 ### Shell 重定向与错误处理
@@ -214,6 +217,8 @@ cat addresses.txt | python3 tools/symbolize.py   # 也可从 stdin 读
 | 46 | `SYS_ttyecho` | `int ttyecho(int enabled)` |
 | 47 | `SYS_mmap` | `void *mmap(void *addr, uint64 len, int prot, int flags, int fd, uint64 off)` |
 | 48 | `SYS_munmap` | `int munmap(void *addr, uint64 len)` |
+| 49 | `SYS_tracectl` | `int tracectl(int op, int pid)` |
+| 50 | `SYS_traceread` | `int traceread(struct trace_entry *buf, int max, uint64 *lost)` |
 
 ### 虚拟内存映射用法
 
@@ -268,7 +273,7 @@ python3 test-shell.py --cpus 3
 ./test-xv6.py crash --cpus 3
 ```
 
-- `dedicated` 集合：`cowtest`、`kmemtest`、`waitxtest`、`cputest`、`priotest`、`idtest`、`permtest`、`privtest`、`mmaptest`、`mixstress`、`sigtest`、`fslimit`。
+- `dedicated` 集合：`cowtest`、`kmemtest`、`waitxtest`、`cputest`、`priotest`、`idtest`、`permtest`、`privtest`、`mmaptest`、`mixstress`、`sigtest`、`fslimit`、`tracetest`。
 - 所有 QEMU 测试先认证为 root；每次运行都会重新生成 `fs.img`。
 - 每个专用测试默认超时 120 秒，完整 `usertests` 为 600 秒，可用 `--timeout` 调整。
 - `--repeat` 只做重复验证，失败不自动重试。

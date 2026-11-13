@@ -407,3 +407,81 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `python3 test-shell.py --cpus 1` | syntax / memory / append / jobs 全部 PASS |
 
 未执行：三核 QEMU 回归与 Linux CI。本批不涉及内核、页表、信号与磁盘格式，按计划 §2.5 只要求宿主测试、构建和一次 QEMU 冒烟；合并前仍以 PR 的 Linux 单核/三核 CI 为准。
+
+### 批次 15 — 系统调用飞行记录器
+
+目标是让一次失败能回答“谁、在什么时候、调用了什么、参数和路径是什么、返回什么”，并在 panic 时保留现场。默认路径不变：没有进程开启 trace 时，每个系统调用只多一次标志分支，不写环、不复制路径。
+
+**交付**
+
+| 文件 | 内容 |
+| --- | --- |
+| `kernel/trace.h` | 共享的 `struct trace_entry`、`TRACE_*` 常量、系统调用名表 `TRACE_SYSCALLS(X)` |
+| `kernel/trace.c` | 1,024 条记录的全局环、入口/返回记录、`tracectl` / `traceread`、panic 转储 |
+| `kernel/syscall.c` | 在入口与返回处记录，路径类调用在入口有界复制路径 |
+| `kernel/proc.[ch]` | 进程增加 `trace` 标志；`allocproc` 清零，`fork` 继承，`exec` 保留 |
+| `kernel/syscall.h`、`defs.h`、`sysproc.c`、`user/usys.pl`、`user/user.h` | 登记 `SYS_tracectl = 49`、`SYS_traceread = 50` 及用户桩 |
+| `user/trace.c` | `trace` 命令：`-f`、`-p PID`、`-e call,...`、`-o file` |
+| `user/tracetest.c` | `DEDICATED` 自检：失败调用、ppid、按 pid 附着、关闭、权限与过滤、回绕 |
+
+**记录与环**
+
+`struct trace_entry` 为 96 字节（`tick`、`ret`、`args[3]`、`pid`、`ppid`、`uid`、`syscall`、`mode`、`flags`、`seq`、`path[32]`），环共 96 KiB 静态内存。记录点只在 `syscall()`：入口写 ENTER、参数与路径，返回写 EXIT 与返回值；进程在本次调用中关闭 trace 时，只留入口、不写出口。
+
+写入沿用 `klog` 的无锁发布方式：先把槽位的 `seq` 置 0，填完记录后以 release 写入最终序号，再以 release 前移写索引。读者 acquire 读取序号，复制后再次校验；正在被覆盖的槽位直接跳过，因此不会把半个记录交给用户。环回绕时新记录覆盖旧记录，`traceread` 通过 `lost` 返回自上次 `TRACE_CLEAR` 以来被覆盖的记录总数（单调增加），并在 `trace` 命令中按增量提示。
+
+路径类调用（`open`、`mknod`、`unlink`、`link`、`mkdir`、`chdir`、`exec`、`chmod`、`chown`）在入口用最多 31 字节的 `fetchstr` 复制路径；复制失败就把路径清空，不影响系统调用本身。EXIT 记录复用栈上已复制的路径，不再第二次读取用户内存，因此 `exec` 成功后也能显示被执行的路径。
+
+**权限与读取**
+
+- `tracectl(op, pid)`：`op` 为 `TRACE_ON` / `TRACE_OFF` / `TRACE_CLEAR`；`pid = 0` 表示调用者自己。控制另一个进程的规则与 `signal()` 一致：root 或同 UID；`TRACE_CLEAR` 仅 root。
+- `traceread(buf, max, lost)`：返回最近的至多 `max` 条记录（最旧到最新），不带游标；调用者用记录中的 `seq` 去重和续读。非 root 调用者只会收到 `uid` 等于自己的记录，其他 UID 的记录在内核里过滤掉，不进入用户缓冲区。任何锁都不跨 `copyout`。
+- 与计划文字的差异：计划写“非 root 读取其他 UID 的环返回 -1”。实现选择“过滤后不可见，只有自己的记录时返回 0”。理由是返回 -1 会让非 root 的 trace 结果取决于 root 是否恰好也在 trace，而真正的安全属性是不泄露；跨 UID 的 `tracectl` 仍然返回 -1，`tracetest` 同时验证这两点。
+- 另一个差异是 `-f`：`fork` 继承 `trace` 标志是内核规则，子进程和孙进程总会被记录，所以 `-f` 只是把这一行为写清楚，不改变行为；`trace` 命令只对被跟踪目标开启标志，自身的轮询循环不被记录。
+
+**panic 转储**
+
+`panic()` 打印原因后，如果当前进程的 `trace` 为真，从环中取该 pid 的最后 32 条记录按时间顺序打印。路径只读环、不加锁、不分配内存；环回绕或遇到正在改写的槽位时在末尾打印 `trace: partial`。因为会停机，这项能力用临时构建（在 trace 的 `open` 入口插入一次 `panic("trace test")`）验证，验证后立即还原，不加入常规回归。实际输出：
+
+```
+panic: trace test
+trace: last 1 records for pid 4
+trace: 4 3 enter open("/no/such/file",0,1ac8)
+```
+
+**`trace` 命令**
+
+输出固定为 `pid ppid name(args) = ret`；路径类调用的第一个参数显示为带引号的路径，其余参数以十六进制显示，返回值按十进制显示。`-e` 只过滤显示（记录仍在环里），`-o` 写入文件而不是控制台，`-p PID` 附着到已存在的进程并轮询到它退出。命令模式在子进程 `exec` 前开启标志，父进程用 `psinfo` 判断目标是否仍在运行，每 tick 排空一次环，目标结束后再排空一次并以其退出码退出。
+
+**验收结果**
+
+本机（WSL2 Ubuntu 26.04 / Python 3.12.16 / QEMU 10.2.1 / riscv64-linux-gnu-gcc 15.2.0 / clang-format 21.1.8，QEMU 走 TCG）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `make fmt && git diff --exit-code` | 无差异 |
+| `make kernel/kernel fs.img` | 通过，3200 块 / 47 元数据块 |
+| `python3 test-harness.py` | 21 项通过 |
+| `python3 test-auth.py` | 1 项通过 |
+| `python3 test-xv6.py dedicated --cpus 3` | 13 项全部 PASS，`fslimit` 49.1 s，`tracetest` 1.5 s |
+| `python3 test-xv6.py dedicated --cpus 1` | 13 项全部 PASS，`fslimit` 45.8 s，`tracetest` 1.5 s |
+| `python3 test-xv6.py usertests --cpus 3` | `ALL TESTS PASSED`，197.9 s |
+| `python3 test-xv6.py usertests --cpus 1` | `ALL TESTS PASSED`，181.6 s |
+| `python3 test-xv6.py crash --cpus 3` | PASS，7.7 s |
+| `python3 test-xv6.py crash --cpus 1` | PASS，7.3 s |
+| `python3 test-stage3.py --cpus 1` / `--cpus 3` | 两项均 PASS |
+| `python3 test-shell.py --cpus 1` / `--cpus 3` | syntax / memory / append / jobs 全部 PASS |
+| 临时 panic 构建 + 手工启动 | 转储出 pid/ppid、`open` 路径与参数；还原后重新构建通过 |
+
+手工 `/trace -e open /ls /` 能看到 `open("//etc",0x0,0xE) = 4` 这类带路径的记录；`/ls` 的逐字符写和目录读会产生上千条记录，环回绕时输出 `[trace: 724 older records lost]`，符合“诊断流不是可靠审计日志”的定位。
+
+未执行：Linux CI 与 macOS 构建（本机为 WSL2）；合并前仍以 PR 的 Linux 单核/三核 CI 为准。
+
+**限制**
+
+- 环是固定 96 KiB 静态内存。目标程序的写/读很密集时会很快覆盖旧记录；记录丢失以 `lost` 和 `[trace: ... lost]` 明示，不保证完整。
+- `TRACE_CLEAR` 与仍在进行的写者存在竞态：写者可能用旧索引发布一条记录，清空后偶尔还能看到一条旧记录。诊断用途接受这一点。
+- `ppid` 在记录时未持有 `wait_lock`，并发被收养时可能显示新的父进程；这与 trace 的 best-effort 定位一致。
+- `trace` 命令轮询周期为一个 tick，目标在两次轮询之间产生超过 1,024 条记录时会丢记录；`-o` 也只写实际读到的部分。
+- `trace -p` 只能等待目标退出，不能中途停止；需要提前结束时由目标自身退出或从另一个终端杀掉目标。
+- 不把 trace 当作安全审计或持久化日志：环会覆盖，panic 输出允许不完整，非 root 只能看到自己的记录。
