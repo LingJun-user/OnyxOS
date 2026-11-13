@@ -552,25 +552,37 @@ class Image:
             else:
                 used[block] = owner
 
+        blocks = (dinode["size"] + layout.bsize - 1) // layout.bsize
         for index, block in enumerate(dinode["addrs"][:layout.ndirect]):
             if block:
                 reference(block, f"inode {inum} direct {index}")
+            elif index < blocks:
+                findings.error(
+                    "inode",
+                    f"inode {inum}: direct block {index} is missing but "
+                    f"inside the file size")
         indirect = dinode["addrs"][layout.ndirect]
+        need = max(0, blocks - layout.ndirect)
         if indirect == 0:
+            if need:
+                findings.error(
+                    "inode",
+                    f"inode {inum}: indirect block is missing but logical "
+                    f"blocks {layout.ndirect}..{blocks - 1} are inside the "
+                    "file size")
             return
         reference(indirect, f"inode {inum} indirect")
         entries = struct.unpack_from(
             "<%dI" % layout.nindirect, self.block(indirect))
-        need = max(0, (dinode["size"] + layout.bsize - 1) // layout.bsize
-                   - layout.ndirect)
         for index, block in enumerate(entries):
             if block:
                 reference(block, f"inode {inum} indirect {index}")
             elif index < need:
-                findings.warning(
+                findings.error(
                     "inode",
-                    f"inode {inum}: hole at logical block "
-                    f"{layout.ndirect + index} inside the file")
+                    f"inode {inum}: indirect entry {index} is missing but "
+                    f"logical block {layout.ndirect + index} is inside the "
+                    "file size")
 
     def _fsck_directories(self, findings, reachable):
         layout = self.layout
@@ -846,9 +858,6 @@ def add_file(image_path, host_path, name=None, root=ROOT):
     dinode["size"] = len(payload)
     dinode["addrs"] = [0] * (layout.ndirect + 1)
     if payload:
-        blocks = (len(payload) + layout.bsize - 1) // layout.bsize
-        if blocks > layout.ndirect:
-            dinode["addrs"][layout.ndirect] = builder.free_block()
         builder.write_data(dinode, 0, payload)
     builder.write_inode(inum, dinode)
 

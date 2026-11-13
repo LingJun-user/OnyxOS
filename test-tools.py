@@ -272,6 +272,72 @@ class FsckTests(Workspace):
         self.assertEqual(result.returncode, 1)
         self.assertIn("committed log", result.stdout)
 
+    def test_missing_direct_block_inside_the_file_is_an_error(self):
+        layout = onyxfs.Layout(ROOT)
+        image = onyxfs.Image.open(self.image, layout)
+        inum = image.lookup(layout.rootino, "hello.txt")
+        block = image.inode(inum)["addrs"][0]
+        self.assertTrue(block)
+        data = bytearray(self.image.read_bytes())
+        offset = (image.sb["inodestart"] * layout.bsize
+                  + inum // layout.ipb * layout.bsize
+                  + inum % layout.ipb * layout.dinode_size
+                  + layout.field("dinode", "addrs")["offset"])
+        struct.pack_into("<I", data, offset, 0)
+        base = image.sb["bmapstart"] * layout.bsize + block // 8
+        data[base] &= ~(1 << (block % 8)) & 0xFF
+        self.image.write_bytes(data)
+        result = self.fsck()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"inode {inum}: direct block 0 is missing", result.stdout)
+
+
+class IndirectFsckTests(Workspace):
+    files = {"big.bin": b"B" * (64 * 1024)}
+
+    def open_image(self):
+        layout = onyxfs.Layout(ROOT)
+        image = onyxfs.Image.open(self.image, layout)
+        inum = image.lookup(layout.rootino, "big.bin")
+        dinode = image.inode(inum)
+        self.assertGreater(dinode["size"] // layout.bsize, layout.ndirect)
+        return layout, image, inum, dinode, bytearray(self.image.read_bytes())
+
+    def inode_offset(self, layout, image, inum, field):
+        return (image.sb["inodestart"] * layout.bsize
+                + inum // layout.ipb * layout.bsize
+                + inum % layout.ipb * layout.dinode_size
+                + layout.field("dinode", field)["offset"])
+
+    def free_bit(self, layout, image, data, block):
+        base = image.sb["bmapstart"] * layout.bsize + block // 8
+        data[base] &= ~(1 << (block % 8)) & 0xFF
+
+    def test_missing_indirect_block_is_an_error(self):
+        layout, image, inum, dinode, data = self.open_image()
+        indirect = dinode["addrs"][layout.ndirect]
+        self.assertTrue(indirect)
+        struct.pack_into("<I", data,
+                         self.inode_offset(layout, image, inum, "addrs")
+                         + layout.ndirect * 4, 0)
+        self.free_bit(layout, image, data, indirect)
+        self.image.write_bytes(data)
+        result = self.fsck()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"inode {inum}: indirect block is missing", result.stdout)
+
+    def test_missing_indirect_entry_inside_the_file_is_an_error(self):
+        layout, image, inum, dinode, data = self.open_image()
+        table = dinode["addrs"][layout.ndirect]
+        block = struct.unpack_from("<I", data, table * layout.bsize)[0]
+        self.assertTrue(block)
+        struct.pack_into("<I", data, table * layout.bsize, 0)
+        self.free_bit(layout, image, data, block)
+        self.image.write_bytes(data)
+        result = self.fsck()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"inode {inum}: indirect entry 0 is missing", result.stdout)
+
 
 class PutTests(Workspace):
     def test_put_keeps_the_image_clean_and_other_files_intact(self):
@@ -310,7 +376,26 @@ class PutTests(Workspace):
         self.assertEqual(hashlib.sha256(self.cat("/big.bin")).hexdigest(),
                          hashlib.sha256(payload).hexdigest())
 
-    def test_put_grows_the_root_directory(self):
+    def test_put_does_not_trust_the_old_contents_of_a_reused_block(self):
+        layout = onyxfs.Layout(ROOT)
+        image = onyxfs.Image.open(self.image, layout)
+        nmeta = (image.sb["bmapstart"] + image.sb["size"] // layout.bpb + 1)
+        data = bytearray(self.image.read_bytes())
+        for block in range(nmeta, image.sb["size"]):
+            if not image._bit(block):
+                start = block * layout.bsize
+                data[start:start + layout.bsize] = b"X" * layout.bsize
+        self.image.write_bytes(data)
+        self.assertClean()
+        source = self.tmp / "reuse.bin"
+        payload = b"Z" * (layout.bsize * (layout.ndirect + 1))
+        source.write_bytes(payload)
+        result = self.put(source)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertClean()
+        self.assertEqual(self.cat("/reuse.bin"), payload)
+
+
         for index in range(24):
             source = self.tmp / f"g{index}"
             source.write_bytes(b"payload")
