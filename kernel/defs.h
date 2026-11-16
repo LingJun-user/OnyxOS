@@ -180,6 +180,7 @@ int             fetchaddr(uint64, uint64*);
 void            syscall();
 
 // trace.c
+void            traceinit(void);
 void            trace_record(int, int, uint64, uint64, uint64, uint64, const char*);
 int             trace_takes_path(int);
 int             ktracectl(int, int);

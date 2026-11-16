@@ -4,13 +4,15 @@
 // off unless a process asks for it with tracectl(), so the default path
 // costs one branch per syscall and nothing else.
 //
-// The ring is lock-free for the same reason klog's byte ring is: panic()
-// must be able to read it without taking a lock or allocating memory.  A
-// writer marks its slot in progress (seq = 0), fills the record, then
-// publishes the final sequence and only afterwards the write index.  A
-// reader copies a record and checks that its sequence did not change; a
-// slot being overwritten is skipped rather than reported torn.  This is a
-// diagnostic stream, not a reliable audit log.
+// Writers are serialised by trace_lock so that two harts can never claim
+// the same index or interleave the fields of one record.  Readers stay
+// lock-free because panic() must be able to read the ring without taking a
+// lock or allocating memory.  A writer marks its slot in progress (seq =
+// 0), fills the record, publishes the final sequence, then advances the
+// write index with a release store.  A reader copies a record and checks
+// that its sequence did not change; a slot being overwritten is skipped
+// rather than reported torn.  This is a diagnostic stream, not a reliable
+// audit log.
 
 #include "types.h"
 #include "param.h"
@@ -25,12 +27,19 @@
 // The process table, defined in proc.c; only tracectl() walks it.
 extern struct proc proc[NPROC];
 
+static struct spinlock trace_lock;
 static struct trace_entry tracebuf[TRACE_NENT];
 
 // Records ever published since the last CLEAR.  A slot for record w lives
 // at w % TRACE_NENT, so w - TRACE_NENT is the number of records that have
 // been overwritten.
 static uint64 trace_w;
+
+void
+traceinit(void)
+{
+  initlock(&trace_lock, "trace");
+}
 
 static const char *
 trace_syscall_name(int num)
@@ -69,6 +78,9 @@ trace_takes_path(int num)
 
 // Append one record.  The caller has already checked the process's trace
 // flag; path may be null when the call has no path or it could not be read.
+// The write lock is held only while filling one slot: it gives every record
+// a unique index and sequence number, and keeps a slower writer from
+// publishing over a newer one when the ring wraps.
 void
 trace_record(int num, int flags, uint64 ret, uint64 a0, uint64 a1, uint64 a2,
              const char *path)
@@ -81,7 +93,8 @@ trace_record(int num, int flags, uint64 ret, uint64 a0, uint64 a1, uint64 a2,
   if (p == 0)
     return;
 
-  w = __atomic_load_n(&trace_w, __ATOMIC_RELAXED);
+  acquire(&trace_lock);
+  w = trace_w;
   e = &tracebuf[w % TRACE_NENT];
 
   __atomic_store_n(&e->seq, 0, __ATOMIC_RELEASE);
@@ -103,6 +116,7 @@ trace_record(int num, int flags, uint64 ret, uint64 a0, uint64 a1, uint64 a2,
   safestrcpy(e->path, path ? path : "", TRACE_PATH);
   __atomic_store_n(&e->seq, (uint32)(w + 1), __ATOMIC_RELEASE);
   __atomic_store_n(&trace_w, w + 1, __ATOMIC_RELEASE);
+  release(&trace_lock);
 }
 
 static void
@@ -179,11 +193,19 @@ ktracectl(int op, int pid)
   struct proc *p, *cur = myproc();
 
   if (op == TRACE_CLEAR) {
+    int i;
+
     if (cur->uid != 0)
       return -1;
-    // Writers that loaded the old index may still publish it; a reader can
-    // see a stale record afterwards, which is fine for a debugging ring.
+    // The write lock waits for writers already inside trace_record(), so no
+    // one can publish an index from before the clear afterwards.  Zeroing
+    // the sequences also makes an in-flight reader skip every old slot
+    // instead of returning records that the clear has just discarded.
+    acquire(&trace_lock);
+    for (i = 0; i < TRACE_NENT; i++)
+      __atomic_store_n(&tracebuf[i].seq, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&trace_w, 0, __ATOMIC_RELEASE);
+    release(&trace_lock);
     return 0;
   }
   if (op != TRACE_ON && op != TRACE_OFF)

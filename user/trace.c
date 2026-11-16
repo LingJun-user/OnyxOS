@@ -4,11 +4,13 @@
 //   trace [-o FILE] [-e CALL,...] COMMAND [ARG...]
 //   trace [-o FILE] [-e CALL,...] -p PID
 //
-// Only the target is traced, not this polling loop: the flag is turned on
-// in the child just before exec, or on the attached pid.  fork() inherits
-// the flag, so a target's descendants are covered too.  -f names that
-// behaviour explicitly; it changes nothing because inheritance is a kernel
-// rule, not an option of this tool.
+// Only the target and the processes it forks are printed, not this polling
+// loop: the flag is turned on in the child just before exec, or on the
+// attached pid.  fork() inherits the flag, so a target's descendants are
+// recorded too; the tree below is rebuilt from the ppid of each record so
+// that two trace commands on the same machine do not mix their output.
+// -f names that behaviour explicitly; it changes nothing because
+// inheritance is a kernel rule, not an option of this tool.
 //
 // Output is one line per completed syscall:
 //
@@ -24,12 +26,15 @@
 #include "kernel/trace.h"
 #include "user/user.h"
 
-#define MAXONLY 8
+#define MAXONLY  8
+#define MAXTRACK 1024
 
 static struct trace_entry records[TRACE_NENT];
 static struct psinfo psnap[NPROC];
 static char only[MAXONLY][16];
 static int nonly;
+static int tracked[MAXTRACK];
+static int ntracked;
 static uint32 last_seq;
 static uint64 last_lost;
 static int outfd = 1;
@@ -86,6 +91,43 @@ wanted(int num)
   return 0;
 }
 
+static int
+tracked_pid(int pid)
+{
+  int i;
+
+  if (pid <= 0)
+    return 0;
+  for (i = 0; i < ntracked; i++)
+    if (tracked[i] == pid)
+      return 1;
+  return 0;
+}
+
+static void
+track(int pid)
+{
+  if (pid <= 0 || tracked_pid(pid) || ntracked >= MAXTRACK)
+    return;
+  tracked[ntracked++] = pid;
+}
+
+// A record belongs to the target or to a process whose parent is already
+// known to belong to it.  Records arrive in sequence order, so one pass
+// grows the tree: once a parent is known, the children it forks join on
+// their next record (their ppid is the parent's pid).
+static int
+in_target_tree(struct trace_entry *e)
+{
+  if (tracked_pid(e->pid))
+    return 1;
+  if (tracked_pid(e->ppid)) {
+    track(e->pid);
+    return 1;
+  }
+  return 0;
+}
+
 static void
 emit(struct trace_entry *e)
 {
@@ -97,9 +139,9 @@ emit(struct trace_entry *e)
   fprintf(outfd, ",0x%lx,0x%lx) = %ld\n", e->args[1], e->args[2], e->ret);
 }
 
-// Read the ring and print the exit records that are newer than anything
-// already seen.  The kernel returns the newest window, so seq is the
-// cursor: records below it were printed or skipped in an earlier round.
+// Read the ring and print the target's exit records that are newer than
+// anything already seen.  The kernel returns the newest window, so seq is
+// the cursor: records below it were printed or skipped in an earlier round.
 static int
 drain(void)
 {
@@ -121,6 +163,8 @@ drain(void)
     if (e->seq <= last_seq)
       continue;
     last_seq = e->seq;
+    if (!in_target_tree(e))
+      continue;
     if (!(e->flags & TRACE_EXIT))
       continue;
     if (!wanted(e->syscall))
@@ -200,6 +244,7 @@ main(int argc, char **argv)
   baseline();
 
   if (attach) {
+    track(pid);
     if (tracectl(TRACE_ON, pid) != 0) {
       fprintf(2, "trace: cannot trace pid %d\n", pid);
       exit(1);
@@ -227,6 +272,7 @@ main(int argc, char **argv)
     exit(127);
   }
 
+  track(child);
   while (alive(child)) {
     drain();
     pause(1);

@@ -122,7 +122,7 @@ QEMU 默认参数为 `-m 128M -smp 3`，可用 `make qemu CPUS=1` 改变 hart �
 | `mixstress` | fork/wait、管道、COW、文件操作的组合压力测试 |
 | `fslimit [n]` | 目录与容量边界自检：跨间接块、上限推导、inode / 块耗尽与名字截断 |
 | `trace [-f] [-o file] [-e call,...] command` | 系统调用飞行记录：按 pid/ppid 打印参数、路径与返回值；`-p PID` 附着到已有进程 |
-| `tracetest` | 飞行记录器自检：失败调用、ppid、按 pid 附着、关闭、权限过滤与回绕 |
+| `tracetest` | 飞行记录器自检：失败调用、ppid、按 pid 附着、关闭、权限过滤、回绕、并发写者与 CLEAR |
 
 ---
 
