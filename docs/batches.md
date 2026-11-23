@@ -359,7 +359,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | --- | --- |
 | `tools/onyxfs.py` | `ls` / `cat` / `stat` / `fsck` / `put`，`--json` |
 | `tools/symbolize.py` | `0x...`、`文件:地址`、stdin → `<prefix>addr2line -f -C -e <elf>` |
-| `test-tools.py` | `unittest`：布局推导、坏 magic/旧 magic、截断、脏日志、位图泄漏、inode 越界、`put` 前后一致性与文件模式、头解析失败、符号化；`--qemu` 追加一次客户机回读 |
+| `test-tools.py` | `unittest`：布局推导、坏 magic/旧 magic、截断、脏日志、位图泄漏、inode 越界、`size` 范围内缺失的直接块/间接块/间接项、`put` 复用含旧数据的空闲块、`put` 前后一致性与文件模式、头解析失败、符号化；`--qemu` 追加一次客户机回读 |
 
 **布局常量不硬编码**
 
@@ -373,7 +373,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 2. 日志：头部的 `n` 必须在 `[0, nlog)`，非 0 表示有未提交事务，按错误报出（宿主不重放日志）；
 3. 位图：元数据块必须占用、镜像末尾之后的位必须为 0、被 inode 引用的块必须在数据区内且已标记；
 4. inode：类型合法、`nlink ≥ 1`、大小不超过 `MAXFILE * BSIZE`、设备节点大小为 0、目录大小是目录项大小的整数倍；
-5. 地址：直接块与间接块都要落在数据区并被位图标记，同一块被两处引用报"已被谁使用"；间接项在文件末尾之后仍被分配时给警告；
+5. 地址：直接块与间接块都要落在数据区并被位图标记，同一块被两处引用报"已被谁使用"；`size` 范围内的直接块、间接块或间接表项缺失一律报错（文件系统没有稀疏文件语义）；
 6. 目录：从根遍历，`. ` 与 `..` 的位置和指向、重名、空名、带 `/` 的名字、指向空闲 inode 的项、同一目录被两个父目录引用；
 7. `nlink`：目录按 `1 + 子目录数`、普通文件按目录项引用数核对；分配了却不可达的 inode 单独报出；
 8. 泄漏：位图标为占用但没有任何 inode 引用的数据块逐个报出。
@@ -400,8 +400,8 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `make mkfs/mkfs kernel/kernel fs.img` | 通过，3200 块 / 47 元数据块 |
 | `python3 test-harness.py` | 21 项通过 |
 | `python3 test-auth.py` | 1 项通过 |
-| `python3 test-tools.py` | 30 项通过，约 5.9 秒 |
-| `python3 test-tools.py --qemu` | 31 项通过，约 7.2 秒（含一次客户机启动与 `cat` 回读） |
+| `python3 test-tools.py` | 33 项通过，约 6.2 秒 |
+| `python3 test-tools.py --qemu` | 34 项通过，约 7.3 秒（含一次客户机启动与 `cat` 回读） |
 | `python3 tools/onyxfs.py fsck fs.img` | 退出码 0，`clean` |
 | `python3 tools/symbolize.py --kernel 0x80000af2` | `panic at ./kernel/printk.c:231` |
 | `python3 test-shell.py --cpus 1` | syntax / memory / append / jobs 全部 PASS |

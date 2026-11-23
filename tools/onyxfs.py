@@ -20,6 +20,7 @@ Exit codes: 0 success, 1 findings or refusal, 2 usage or layout error.
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -451,6 +452,9 @@ class Image:
                 f"describes {sb['size'] * layout.bsize}")
             return findings
 
+        if findings.errors:
+            return findings
+
         self._fsck_log(findings)
         used = {}
         self._fsck_bitmap(findings, nmeta)
@@ -552,25 +556,37 @@ class Image:
             else:
                 used[block] = owner
 
+        blocks = (dinode["size"] + layout.bsize - 1) // layout.bsize
         for index, block in enumerate(dinode["addrs"][:layout.ndirect]):
             if block:
                 reference(block, f"inode {inum} direct {index}")
+            elif index < blocks:
+                findings.error(
+                    "inode",
+                    f"inode {inum}: direct block {index} is missing but "
+                    f"inside the file size")
         indirect = dinode["addrs"][layout.ndirect]
+        need = max(0, blocks - layout.ndirect)
         if indirect == 0:
+            if need:
+                findings.error(
+                    "inode",
+                    f"inode {inum}: indirect block is missing but logical "
+                    f"blocks {layout.ndirect}..{blocks - 1} are inside the "
+                    "file size")
             return
         reference(indirect, f"inode {inum} indirect")
         entries = struct.unpack_from(
             "<%dI" % layout.nindirect, self.block(indirect))
-        need = max(0, (dinode["size"] + layout.bsize - 1) // layout.bsize
-                   - layout.ndirect)
         for index, block in enumerate(entries):
             if block:
                 reference(block, f"inode {inum} indirect {index}")
             elif index < need:
-                findings.warning(
+                findings.error(
                     "inode",
-                    f"inode {inum}: hole at logical block "
-                    f"{layout.ndirect + index} inside the file")
+                    f"inode {inum}: indirect entry {index} is missing but "
+                    f"logical block {layout.ndirect + index} is inside the "
+                    "file size")
 
     def _fsck_directories(self, findings, reachable):
         layout = self.layout
@@ -806,6 +822,17 @@ class Builder:
 
 def add_file(image_path, host_path, name=None, root=ROOT):
     """Append one regular file to the root directory of image_path."""
+    # os.replace changes the image inode. The parent directory remains a
+    # stable lock shared by all put operations in the same directory.
+    directory = os.open(os.path.dirname(os.path.abspath(image_path)), os.O_RDONLY)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        return _add_file_locked(image_path, host_path, name, root, directory)
+    finally:
+        os.close(directory)
+
+
+def _add_file_locked(image_path, host_path, name, root, directory):
     layout = Layout(root)
     image = Image.open(image_path, layout)
     findings = image.fsck()
@@ -846,9 +873,6 @@ def add_file(image_path, host_path, name=None, root=ROOT):
     dinode["size"] = len(payload)
     dinode["addrs"] = [0] * (layout.ndirect + 1)
     if payload:
-        blocks = (len(payload) + layout.bsize - 1) // layout.bsize
-        if blocks > layout.ndirect:
-            dinode["addrs"][layout.ndirect] = builder.free_block()
         builder.write_data(dinode, 0, payload)
     builder.write_inode(inum, dinode)
 
@@ -895,12 +919,7 @@ def add_file(image_path, host_path, name=None, root=ROOT):
         except OSError:
             pass
         raise
-    directory = os.open(os.path.dirname(os.path.abspath(image_path)) or ".",
-                        os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    os.fsync(directory)
     return {"name": "/" + name, "inode": inum, "size": len(payload),
             "sha256": hashlib.sha256(payload).hexdigest()}
 
