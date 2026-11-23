@@ -265,6 +265,14 @@ class FsckTests(Workspace):
         self.assertIn("inode 2", result.stdout)
         self.assertIn("MAXFILE", result.stdout)
 
+    def test_invalid_log_location_returns_json_findings(self):
+        layout = onyxfs.Layout(ROOT)
+        offset = layout.bsize + layout.field("superblock", "logstart")["offset"]
+        image = self.corrupt(offset, "<I", layout.fssize)
+        result = cli("fsck", "--json", image)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("logstart", json.loads(result.stdout)["errors"][0]["message"])
+
     def test_dirty_log_is_reported(self):
         layout = onyxfs.Layout(ROOT)
         image = self.corrupt(2 * layout.bsize, "<i", 1)
@@ -349,6 +357,18 @@ class PutTests(Workspace):
         self.assertClean()
         self.assertEqual(self.cat("/note.txt"), source.read_bytes())
         self.assertEqual(self.cat("/hello.txt"), before)
+
+    def test_concurrent_puts_keep_every_file(self):
+        names = [f"dest{i}" for i in range(8)]
+        with tempfile.TemporaryFile() as log:
+            writers = [subprocess.Popen(
+                [sys.executable, str(TOOLS / "onyxfs.py"), "put",
+                 self.image, self.tmp / "hello.txt", name],
+                stdout=log, stderr=log) for name in names]
+            self.assertEqual([writer.wait() for writer in writers], [0] * len(names))
+        for name in names:
+            self.assertEqual(self.cat("/" + name), self.files["hello.txt"])
+        self.assertClean()
 
     def test_put_leaves_no_temporary_file(self):
         source = self.tmp / "note.txt"

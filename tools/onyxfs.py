@@ -20,6 +20,7 @@ Exit codes: 0 success, 1 findings or refusal, 2 usage or layout error.
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -451,6 +452,9 @@ class Image:
                 f"describes {sb['size'] * layout.bsize}")
             return findings
 
+        if findings.errors:
+            return findings
+
         self._fsck_log(findings)
         used = {}
         self._fsck_bitmap(findings, nmeta)
@@ -818,6 +822,17 @@ class Builder:
 
 def add_file(image_path, host_path, name=None, root=ROOT):
     """Append one regular file to the root directory of image_path."""
+    # os.replace changes the image inode. The parent directory remains a
+    # stable lock shared by all put operations in the same directory.
+    directory = os.open(os.path.dirname(os.path.abspath(image_path)), os.O_RDONLY)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        return _add_file_locked(image_path, host_path, name, root, directory)
+    finally:
+        os.close(directory)
+
+
+def _add_file_locked(image_path, host_path, name, root, directory):
     layout = Layout(root)
     image = Image.open(image_path, layout)
     findings = image.fsck()
@@ -904,12 +919,7 @@ def add_file(image_path, host_path, name=None, root=ROOT):
         except OSError:
             pass
         raise
-    directory = os.open(os.path.dirname(os.path.abspath(image_path)) or ".",
-                        os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    os.fsync(directory)
     return {"name": "/" + name, "inode": inum, "size": len(payload),
             "sha256": hashlib.sha256(payload).hexdigest()}
 
