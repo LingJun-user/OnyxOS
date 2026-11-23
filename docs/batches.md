@@ -428,7 +428,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 
 `struct trace_entry` 为 96 字节（`tick`、`ret`、`args[3]`、`pid`、`ppid`、`uid`、`syscall`、`mode`、`flags`、`seq`、`path[32]`），环共 96 KiB 静态内存。记录点只在 `syscall()`：入口写 ENTER、参数与路径，返回写 EXIT 与返回值；进程在本次调用中关闭 trace 时，只留入口、不写出口。
 
-写者由 `trace_lock` 串行化：每个记录在持锁期间领取唯一索引、把槽位的 `seq` 置 0、填完记录后以 release 写入最终序号，再以 release 前移写索引，因此两个 hart 不会写到同一个槽位，较晚完成的旧写者也不能把索引改回去。读者不取锁（panic 必须能读），acquire 读取序号，复制后再次校验；正在被覆盖的槽位直接跳过，因此不会把半个记录交给用户。环回绕时新记录覆盖旧记录，`traceread` 通过 `lost` 返回自上次 `TRACE_CLEAR` 以来被覆盖的记录总数（单调增加），并在 `trace` 命令中按增量提示。
+写者由 `trace_lock` 串行化：每个记录在持锁期间领取唯一索引、把槽位的 `seq` 置 0、填完记录后以 release 写入最终序号，再以 release 前移写索引，因此两个 hart 不会写到同一个槽位，较晚完成的旧写者也不能把索引改回去。普通读取逐槽加锁复制，释放锁后校验窗口期望序号，再按 UID 过滤并复制到用户态。panic 转储保持无锁，复制前后校验序号。已被覆盖的窗口槽位直接跳过。路径保留前 31 字节，定长字段的剩余字节清零。环回绕时新记录覆盖旧记录，`traceread` 通过 `lost` 返回自上次 `TRACE_CLEAR` 以来被覆盖的记录总数（单调增加），并在 `trace` 命令中按增量提示。
 
 路径类调用（`open`、`mknod`、`unlink`、`link`、`mkdir`、`chdir`、`exec`、`chmod`、`chown`）在入口用最多 31 字节的 `fetchstr` 复制路径；复制失败就把路径清空，不影响系统调用本身。EXIT 记录复用栈上已复制的路径，不再第二次读取用户内存，因此 `exec` 成功后也能显示被执行的路径。
 

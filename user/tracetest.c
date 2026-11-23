@@ -69,6 +69,8 @@ test_open(void)
   if (pid == 0) {
     if (tracectl(TRACE_ON, 0) != 0)
       exit(2);
+    if (open("/0123456789012345678901234567890123456789", O_RDONLY) >= 0)
+      exit(3);
     if (open("/no/such/file", O_RDONLY) >= 0)
       exit(3);
     exit(0);
@@ -83,6 +85,13 @@ test_open(void)
   expect(strcmp(e->path, "/no/such/file") == 0, "the path is recorded");
   expect(e->ppid == getpid(), "the parent pid is recorded");
   expect(e->uid == 0, "the uid is recorded");
+  int saw_prefix = 0;
+  for (int i = 0; i < n; i++) {
+    if (buf[i].syscall == SYS_open && buf[i].flags == TRACE_EXIT &&
+        strcmp(buf[i].path, "/012345678901234567890123456789") == 0)
+      saw_prefix = 1;
+  }
+  expect(saw_prefix, "long path keeps its first 31 bytes");
 }
 
 // 2. Attaching by pid records another process, which is what trace -p uses.
@@ -246,12 +255,17 @@ test_wrap(void)
 
   expect(tracectl(TRACE_CLEAR, 0) == 0, "clear before the wrap test");
   expect(tracectl(TRACE_ON, 0) == 0, "trace self for the wrap test");
+  open("/tracetest/missing", O_RDONLY);
   for (i = 0; i < 1300; i++)
     getpid();
 
   n = traceread(buf, TRACE_NENT, &lost1);
   expect(n == TRACE_NENT, "a full ring is returned");
   expect(lost1 > 0, "the ring wrapped");
+  char empty_path[TRACE_PATH] = {0};
+  for (i = 0; i < n; i++)
+    expect(memcmp(buf[i].path, empty_path, sizeof(empty_path)) == 0,
+           "reused slots clear the whole path field");
   first = buf[0].seq;
   last = buf[n - 1].seq;
   expect(last > first, "records are in write order");
@@ -317,15 +331,17 @@ test_concurrent(void)
   expect(write(fds[1], "xx", 2) == 2, "release both writers");
   close(fds[1]);
 
-  // Read while they write: the lock-free reader must never hand back a
+  // Read while they write: each snapshot must be ordered and contain no
   // record whose return value belongs to another pid.
   bad = 0;
   for (j = 0; j < 50; j++) {
-    n = traceread(buf, 64, &lost);
+    n = traceread(buf, TRACE_NENT, &lost);
     if (n < 0)
       exit(1);
     for (i = 0; i < n; i++) {
-      if (buf[i].seq == 0 || buf[i].uid != 0)
+      if ((i && buf[i].seq <= buf[i - 1].seq) ||
+          buf[i].seq > lost + TRACE_NENT || buf[i].seq <= lost ||
+          buf[i].uid != 0)
         bad = 1;
       if (buf[i].pid != pid1 && buf[i].pid != pid2)
         bad = 1;

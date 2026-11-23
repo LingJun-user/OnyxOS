@@ -182,6 +182,22 @@ static uint64 (*syscalls[])(void) = {
   // clang-format on
 };
 
+// Copy only the visible prefix. Stop at NUL before touching the next page.
+static void
+trace_path(struct proc *p, uint64 addr, char path[TRACE_PATH])
+{
+  int i;
+  for (i = 0; i < TRACE_PATH - 1; i++) {
+    if (copyin(p->pagetable, p->sz, &path[i], addr + i, 1) < 0) {
+      path[0] = 0;
+      return;
+    }
+    if (path[i] == 0)
+      return;
+  }
+  path[i] = 0;
+}
+
 void
 syscall(void)
 {
@@ -202,10 +218,8 @@ syscall(void)
   a1 = p->trapframe->a1;
   a2 = p->trapframe->a2;
   path[0] = 0;
-  if (traced && trace_takes_path(num)) {
-    if (fetchstr(a0, path, sizeof(path)) < 0)
-      path[0] = 0;
-  }
+  if (traced && trace_takes_path(num))
+    trace_path(p, a0, path);
   if (traced)
     trace_record(num, TRACE_ENTER, 0, a0, a1, a2, path);
 
