@@ -538,8 +538,14 @@ main(int argc, char **argv)
 {
   if (argc > 1 && strcmp(argv[1], "child") == 0)
     child_mode();
-  if (argc > 1 && strcmp(argv[1], "target-a") == 0)
+  if (argc > 1 && strcmp(argv[1], "target-a") == 0) {
+    // The tracer must keep collecting after its direct target exits.
+    int child = fork();
+    if (child != 0)
+      exit(child < 0);
+    pause(5);
     target_mode("/tr-a");
+  }
   if (argc > 1 && strcmp(argv[1], "target-b") == 0)
     target_mode("/tr-b");
 
