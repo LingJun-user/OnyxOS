@@ -18,6 +18,7 @@ OBJS = \
   $K/trampoline.o \
   $K/trap.o \
   $K/trace.o \
+  $K/check.o \
   $K/syscall.o \
   $K/sysproc.o \
   $K/bio.o \
@@ -182,6 +183,7 @@ UPROGS=\
 	$U/_fslimit\
 	$U/_trace\
 	$U/_tracetest\
+	$U/_check\
 	$U/_agent\
 
 fs.img: mkfs/mkfs README $(UPROGS)

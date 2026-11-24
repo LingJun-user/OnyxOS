@@ -55,6 +55,24 @@ filedup(struct file *f)
   return f;
 }
 
+// Diagnostic snapshot of one file structure for check().  Returns the
+// reference count, or -1 if f is not a slot in the file table.  Reading a
+// slot that another process is closing is harmless: the table is a static
+// array, so the pointer never dangles into freed memory.
+int
+file_snapshot(struct file *f, int *type)
+{
+  int ref = -1;
+
+  acquire(&ftable.lock);
+  if (f >= ftable.file && f < &ftable.file[NFILE]) {
+    *type = f->type;
+    ref = f->ref;
+  }
+  release(&ftable.lock);
+  return ref;
+}
+
 // Close file f.  (Decrement ref count, close when reaches 0.)
 void
 fileclose(struct file *f)

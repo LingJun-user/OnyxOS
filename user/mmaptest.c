@@ -80,6 +80,11 @@ anonymous(void)
   p[2 * PAGE] = 'c';
   check(munmap(p + PAGE, PAGE) == 0, "split");
   check(p[0] == 'a' && p[2 * PAGE] == 'c', "split preserves neighbors");
+  if (getuid() == 0) {
+    char report[1];
+    check(kcheck(report, sizeof(report)) == 0,
+          "split anonymous VMA invariants");
+  }
   badaccess(p + PAGE, 1);
   char *hole = anon(1);
   check(hole == p + PAGE && hole[0] == 0, "reuse hole with zero fill");

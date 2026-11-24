@@ -22,6 +22,8 @@ parser.add_argument("--cpus", type=int, choices=(1, 3), default=int(os.environ.g
 parser.add_argument("--repeat", type=int, default=1)
 parser.add_argument("--timeout", type=float, default=120, help="dedicated test timeout in seconds")
 parser.add_argument("--artifacts", default="test-results")
+parser.add_argument("--check", action="store_true",
+                    help="run testrun check after each dedicated test (batch 16)")
 config = argparse.Namespace(cpus=int(os.environ.get("CPUS", "3")), artifacts="test-results")
 sessions = []
 
@@ -327,7 +329,7 @@ def test_usertests(test=""):
 
 DEDICATED = ("cowtest", "kmemtest", "waitxtest", "cputest", "priotest",
              "idtest", "permtest", "privtest", "mmaptest", "mixstress", "sigtest",
-             "fslimit", "tracetest")
+             "fslimit", "tracetest", "check")
 
 
 def git_metadata(*command):
@@ -395,6 +397,11 @@ def main():
                         with QEMU(True) as q:
                             q.wait_shell()
                             run_guest(q, name, args.timeout)
+                            # Optional: the same session that just ran the
+                            # case ends with the invariant scan, which is
+                            # where a leaked fd/VMA/page shows up.
+                            if args.check and name != "check":
+                                run_guest(q, "check --stats", args.timeout)
                     elif name.startswith("usertests:"):
                         test_usertests(name.split(":", 1)[1])
                     else:

@@ -97,6 +97,10 @@ static struct entry cmds[] = {
    "print the syscalls one program makes",
    "trace -p PID attaches to a running process.  -e filters which calls "
    "are shown, -o writes to a file, and children inherit tracing.", 1},
+  {"system info", "check", "[--stats]",
+   "check the kernel's own invariants",
+   "Root only.  Reports violations in the process table, VMAs, open files, "
+   "inodes, bitmap, log and page allocator; --stats prints only counts.", 1},
 
   {"self-checks", "cputest", "[ticks]",
    "cross-check CPU accounting against uptime()",

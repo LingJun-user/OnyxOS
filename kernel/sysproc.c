@@ -396,3 +396,15 @@ sys_traceread(void)
   argaddr(2, &lost);
   return ktraceread(p->pagetable, p->sz, buf, max, lost);
 }
+
+uint64
+sys_kcheck(void)
+{
+  struct proc *p = myproc();
+  uint64 buf;
+  int max;
+
+  argaddr(0, &buf);
+  argint(1, &max);
+  return kcheck(p->pagetable, p->sz, buf, max);
+}

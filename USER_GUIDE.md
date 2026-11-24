@@ -1460,6 +1460,7 @@ cd /home/alice
 | 刷新三次程序列表 | `/top 3` |
 | 查看系统日志，root 使用 | `/dmesg` |
 | 查看一个程序调用的系统调用 | `/trace -e open /ls /` |
+| 检查内核自身账目（root） | `/check`，只看计数用 `/check --stats` |
 | 查看当前任务 | `jobs` |
 | 将任务恢复至前台 | `fg 12`，替换实际编号 |
 | 将暂停任务在后台继续 | `bg 12`，替换实际编号 |
@@ -1491,6 +1492,7 @@ cd /home/alice
 | `sigtest` | 检查程序中断、暂停和继续 |
 | `fslimit` | 检查目录和文件容量的边界 |
 | `trace`、`tracetest` | 打印某个程序调用的系统调用，并检查这张记录表的正确性 |
+| `check` | 检查内核自己的账目和引用关系；发现不一致时打印 `violation:` 行并以非零状态退出 |
 | `mixstress`、`stressfs`、`logstress`、`grind` | 给系统施加大量操作，检查稳定性 |
 | `usertests`、`forktest` | 一组功能检查或程序创建能力检查 |
 | `zombie`、`forphan`、`dorphan` | 制造特定状态，检查系统处理方式 |

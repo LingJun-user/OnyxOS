@@ -85,6 +85,7 @@ extern uint64 sys_mmap(void);
 extern uint64 sys_munmap(void);
 extern uint64 sys_tracectl(void);
 extern uint64 sys_traceread(void);
+extern uint64 sys_kcheck(void);
 
 // Prototypes for the functions that handle system calls.
 extern uint64 sys_fork(void);
@@ -179,6 +180,7 @@ static uint64 (*syscalls[])(void) = {
   [SYS_munmap] = sys_munmap,
   [SYS_tracectl] = sys_tracectl,
   [SYS_traceread] = sys_traceread,
+  [SYS_kcheck] = sys_kcheck,
   // clang-format on
 };
 
