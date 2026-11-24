@@ -10,6 +10,27 @@
 #include "kernel/fcntl.h"
 
 char *argv[] = {"login", 0};
+char *agentargv[] = {"agent", 0};
+
+// DevLink (batch 17): /dev/agent is backed by the virtio-serial port that
+// only `make dev' creates.  The node is made on every boot, but if the
+// device is absent the agent's first read fails and it exits, so the
+// normal boot path is unchanged.
+static void
+start_agent(void)
+{
+  int pid;
+
+  mkdir("/dev");                 // fails harmlessly when it exists
+  mknod("/dev/agent", AGENT, 0); // same
+  chmod("/dev/agent", 0600);     // every boot: the device is root-only
+
+  pid = fork();
+  if (pid == 0) {
+    exec("/agent", agentargv);
+    exit(1);
+  }
+}
 
 int
 main(void)
@@ -22,6 +43,8 @@ main(void)
   }
   dup(0); // stdout
   dup(0); // stderr
+
+  start_agent();
 
   for (;;) {
     printf("init: starting login\n");

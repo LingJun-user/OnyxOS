@@ -128,7 +128,7 @@ QEMU 默认参数为 `-m 128M -smp 3`，可用 `make qemu CPUS=1` 改变 hart �
 
 ## 宿主工具
 
-`tools/` 下的脚本在宿主侧处理镜像和地址，不进入客户机，也不改内核、系统调用号或磁盘格式。
+`tools/` 下的脚本在宿主侧处理镜像和地址；`onyxctl.py` 例外，它通过 `make dev` 提供的本机 socket 驱动客户机。两者都不改系统调用接口或磁盘格式。
 
 ```sh
 python3 tools/onyxfs.py fsck fs.img              # 校验 superblock、日志、位图、inode、目录项、nlink
@@ -142,12 +142,29 @@ python3 tools/symbolize.py --kernel "$ADDR"      # panic at ./kernel/printk.c:..
 python3 tools/symbolize.py --user ls 0x2e4       # user/ls.c:...
 python3 tools/symbolize.py user/_ls:0x2e4        # 同上，直接写 ELF
 cat addresses.txt | python3 tools/symbolize.py   # 也可从 stdin 读
+
+make dev                                         # 启动带 DevLink 的客户机
+python3 tools/onyxctl.py ping                    # 探活
+python3 tools/onyxctl.py exec testrun cowtest    # 在客户机里执行并回收输出
+python3 tools/onyxctl.py put user/_echo /tmp/echo 0755
+python3 tools/onyxctl.py get /tmp/echo ./echo.back
+python3 tools/onyxctl.py stat /etc/passwd
+python3 tools/onyxctl.py klog --seq 0
+make dev-reload                                  # 另开终端：保存 user/*.c 后自动重建并运行
 ```
 
 - 所有命令都接受 `--json`，输出字段固定，供脚本和测试使用。
 - 布局常量（`BSIZE`、`NDIRECT`、`DIRSIZ`、`FSMAGIC`、`NINODES`、`FSSIZE`、`LOGBLOCKS` 及派生值）每次运行都从 `kernel/fs.h`、`kernel/types.h`、`kernel/param.h`、`mkfs/mkfs.c` 解析；解析失败时报出文件名和缺失的名字，不使用默认值。
 - `symbolize.py` 依次用 `--toolprefix`、`TOOLPREFIX`、`riscv64-elf-`、`riscv64-linux-gnu-` 等前缀查找 `addr2line`；都找不到时列出尝试过的名字并退出 2。内核默认 `kernel/kernel`，`NAME:地址` 形式的 `NAME` 按 `user/_NAME` 或路径解析。
 - `onyxfs.py` 退出码：0 成功，1 发现问题或拒绝执行，2 用法或头文件解析错误。
+
+DevLink 说明：
+
+- `make dev` 只在 `make qemu` 的基础上追加一个 virtio-serial 设备（槽 1、IRQ 2）和一个宿主 UNIX socket（`DEVSOCKET`，默认 `/tmp/onyx-dev.sock`）。普通 `make qemu` 不加载设备，`/dev/agent` 的读取直接失败，`agent` 进程随即退出。
+- 设备节点由 `init` 在每次启动时创建并 `chmod 0600`；只有 root 能打开。宿主 socket 位于临时路径，属于本机开发接口：**没有认证，不要暴露给不可信用户或转发到网络**。
+- 协议为 12 字节帧头（magic/type/flags/length/id）加负载，单帧 4 KiB，单次请求/响应上限 64 KiB，支持分片；`exec` 不经过 shell，引号与管道由调用者自行拆分。
+- `exec` 把 stdout/stderr 重定向到客户机 `/tmp` 临时文件，退出后回传并删除；单路输出最多 32 KiB。
+- `onyxctl.py` 的每个请求都有超时、重试和请求 id；失败时报告请求 id 与已收字节数，不无限等待。`klog --cursor-file FILE --follow` 按 seq 游标增量拉日志；`put -`/`get -` 走 stdin/stdout；`watch` 可以监视整个目录或单个 `.c` 文件。
 
 `put` 的边界：
 
@@ -271,6 +288,8 @@ python3 test-shell.py --cpus 3
 ./test-xv6.py usertests --cpus 3
 ./test-xv6.py crash --cpus 1                   # 崩溃恢复
 ./test-xv6.py crash --cpus 3
+
+python3 test-devlink.py                         # DevLink：自己启动 make dev，跑 6 项端到端检查
 ```
 
 - `dedicated` 集合：`cowtest`、`kmemtest`、`waitxtest`、`cputest`、`priotest`、`idtest`、`permtest`、`privtest`、`mmaptest`、`mixstress`、`sigtest`、`fslimit`、`tracetest`。
@@ -279,6 +298,7 @@ python3 test-shell.py --cpus 3
 - `--repeat` 只做重复验证，失败不自动重试。
 - 日志与 JSON 汇总写入 `test-results/`，最近一次串口输出保留在 `test-xv6.out`。
 - `test-tools.py --qemu` 会临时替换 `fs.img` 并在结束后恢复；它同样不能与其他 QEMU 测试并发。
+- `test-devlink.py` 自带 `make dev`，使用临时 socket 和独立进程组，结束时杀掉整组并检查没有遗留 QEMU；串口输出写入 `test-results/`。
 - 同一 checkout 的 QEMU 测试不能并发执行。
 - CI 在 Linux 上以单核/三核各跑一遍完整测试（上限 30 分钟），macOS 仅验证构建。
 
@@ -308,6 +328,8 @@ python3 test-shell.py --cpus 3
 - **`psinfo()` 成本随进程规模增长**：快照期间对每个进程持 `p->lock` 遍历页表，映射页多的进程会让 `top` 变慢。
 - **调度器每 tick 做一次 O(NPROC) 全表扫描**：优先级不继承，子进程从默认优先级开始，需显式 `setprio`。
 - **日志是诊断输出，不是可靠通道**：环形缓冲区在拷贝期间回绕时，输出尾部可能是新旧文本的混合。
+- **DevLink 是开发接口**：`make dev` 才有的 virtio-serial 通道 + root 客户机进程，没有认证、没有网络监听；`/dev/agent` 为 0600，`onyxctl` 依赖本机 socket 权限。内核不提供内存读写，所有文件操作仍走既有权限检查。
+- **DevLink 一次只服务一个宿主连接、一个请求**：agent 串行处理请求，`exec` 输出上限 32 KiB，单次传输上限 64 KiB。
 
 ---
 

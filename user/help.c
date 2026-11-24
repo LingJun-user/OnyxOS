@@ -22,6 +22,10 @@ struct entry {
 
 static struct entry cmds[] = {
   // clang-format off
+  {"system", "agent", "",
+   "DevLink guest agent; started by init, not meant to be run by hand",
+   "Serves tools/onyxctl.py over /dev/agent when the kernel has the "
+   "virtio-serial port from `make dev'.", 1},
   {"system", "init", "",
    "first user process; started by the kernel, then runs login",
    "Not meant to be run by hand.", 0},
