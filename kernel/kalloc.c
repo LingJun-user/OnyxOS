@@ -291,6 +291,26 @@ krefs(void)
   return n;
 }
 
+// One consistent allocator snapshot for check(): the O(1) counters, the
+// free-list length actually walked, and the pages currently handed out.
+// Taking one lock makes nfree and walk comparable; nfree + live must be
+// NPAGE if the accounting holds.
+void
+kmem_snapshot(uint64 *total, uint64 *nfree, uint64 *walk, uint64 *live)
+{
+  struct run *r;
+  uint64 n = 0;
+
+  acquire(&kmem.lock);
+  for (r = kmem.freelist; r; r = r->next)
+    n++;
+  *total = NPAGE;
+  *nfree = kmem.nfree;
+  *walk = n;
+  *live = kmem.kalloc_calls - kmem.pages_released;
+  release(&kmem.lock);
+}
+
 // Report the allocator accounting to sysinfo().  All three values are O(1);
 // the O(N) walk in freemem_walk() stays the reference implementation that the
 // free-page count can be checked against.

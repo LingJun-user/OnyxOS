@@ -489,3 +489,84 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 - `trace` 命令轮询周期为一个 tick，目标在两次轮询之间产生超过 1,024 条记录时会丢记录；`-o` 也只写实际读到的部分。
 - `trace -p` 只能等待目标退出，不能中途停止；需要提前结束时由目标自身退出或从另一个终端杀掉目标。
 - 不把 trace 当作安全审计或持久化日志：环会覆盖，panic 输出允许不完整，非 root 只能看到自己的记录。
+
+### 批次 16 — 内核不变式检查
+
+目标是把“测试没打印 FAIL”提升为“内核自己的账目和引用关系没有被破坏”。`check` 不修复任何东西，只做一次只读扫描；默认启动路径、系统调用编号顺序和磁盘格式都不变，新增的只有一个 root-only 系统调用和一个用户程序。
+
+**交付**
+
+| 文件 | 内容 |
+| --- | --- |
+| `kernel/check.c` | 进程表 / VMA / fd / inode 与目录 / 位图 / 日志头 / 页分配器的只读扫描，4 KiB 固定报告缓冲 |
+| `kernel/sysproc.c`、`kernel/syscall.h`、`kernel/syscall.c`、`kernel/defs.h` | `SYS_kcheck`（51）与内核入口 `kcheck()` |
+| `kernel/fs.c`、`kernel/kalloc.c`、`kernel/log.c`、`kernel/file.c` | 快照函数 `fscount_get()`、`kmem_snapshot()`、`log_check()`、`file_snapshot()` |
+| `kernel/param.h`、`mkfs/mkfs.c` | `NINODES` 移到 `param.h`，mkfs 与内核共用同一处常量 |
+| `user/check.c` | `check` 命令：打印报告；`--stats` 只打印 `stats:` 与 `violations=` 两行；有违规时退出码 1 |
+| `user/user.h`、`user/usys.pl`、`Makefile`、`user/help.c` | 用户桩、`UPROGS` 与帮助索引登记 |
+| `test-xv6.py` | `check` 加入 `DEDICATED`；新增 `--check`，在每个专用用例成功后于同一会话执行 `testrun check --stats` |
+| `test-tools.py` | `--qemu` 下新增两个坏镜像用例：改 `README` 的 `nlink`、清掉超级块在位图中的位 |
+
+**检查项与判据**
+
+| 类别 | 判据 |
+| --- | --- |
+| 进程 | `state` 在 `UNUSED..ZOMBIE` 内；非 `UNUSED` 的 `pid > 0`；同一 pid 不重复；`parent` 为空或落在 `proc[]` 内 |
+| VMA | 已用槽位 `start < end`、页对齐、落在 `[MMAPBASE, MMAPEND)`；`prot` 为 `READ` 或 `READ|WRITE`；`offset` 页对齐；匿名映射 `offset == 0`；文件映射的 `file->ref > 0`；两两不重叠 |
+| fd | 槽位指针属于 `ftable`；`ref > 0`；`type` 在 `FD_PIPE..FD_DEVICE` 内 |
+| inode | `type` 为 `T_DIR`/`T_FILE`/`T_DEVICE`；`size <= MAXFILE*BSIZE`；直接块、间接块与间接块内的地址都落在数据区 `[nmeta, size)`；目录必须有 `.`（指向自己）和 `..`；`..` 必须等于目录项所在的那个父目录 |
+| nlink | 普通文件：`nlink` 等于所有命名的目录项数量；目录：`nlink` 等于 `1 + 子目录数`（与 mkfs/mkdir 的记账方式一致） |
+| 文件系统 | 位图块数与 `fs_nused_blocks`、inode 数与 `fs_nused_inodes` 对照；`size`/`nlog`/`logstart`/`inodestart`/`bmapstart` 与 `FSSIZE`、`LOGBLOCKS`、`NINODES` 自洽；**元数据块必须标为已分配** |
+| 分配器 | `kmem.nfree` 等于实际遍历到的空闲页数；`nfree + live + 内核映像页 == NPAGE` |
+| 日志 | 内存中的日志头长度在 `0..LOGBLOCKS` 内，目的块号都在镜像范围内 |
+
+`nlink == 0` 的孤儿按计划只列出、不计违规。目录的 `nlink` 规则与 `onyxfs.py fsck` 保持一致：目录自身只由 `.` 计一次，每个子目录的 `..` 再加一次，目录自己的 `..` 不会给父目录多加一次。
+
+**并发与语义**
+
+- `wait_lock` 只在进程表快照期间持有，`p->lock` 一次只持有一个，读完 `state/pid/parent/vmas/ofile` 就释放。
+- 完全不持 inode 锁：目录内容用 `bread()` 按块读原始数据。这样即使某个 inode 的 `nlink` 在这期间降到 0，也不会经由 `iput()` 触发 `itrunc()`——检查器修改状态就等于销毁证据。
+- 不持任何锁跨 `copyout`；报告先写进静态缓冲区，最后一次性拷出。
+- 同一时刻只允许一个扫描：`busy` 用原子交换置位，第二个调用直接返回 -1，而不是等锁或覆盖第一份报告。
+- 违规继续扫描、最多记录 16 条，其余只计数；孤儿最多列 8 条，两者都由 `stats:` 行给出总数。
+
+**与计划的差异**
+
+1. 系统调用与用户态桩命名为 `kcheck`，命令仍是 `check`。仓库里 `cowtest`、`idtest`、`mixstress`、`mmaptest`、`priotest`、`privtest` 各自定义了全局 `check()` 辅助函数，直接用同名会同时撞上 `usys.S` 的桩和编译期声明；重命名 245 处测试调用不值得，接口本身没有变化。
+2. 计划写“按 inode 号顺序逐个加锁”，实现改成完全不加 inode 锁、只读原始块。理由同上：加锁读取孤儿 inode 会让 `iput()` 走截断路径。
+3. 计划要求“位图与 `fs_nused_blocks`/`fs_nused_inodes` 一致”。这两组计数在启动时由 `fscount_scan()` 按位图和 inode 表重新校准，运行中天然一致，单靠对比查不出问题；因此额外加入“元数据块必须已分配”的布局判据，并把验收第 4 条的“位图计数不符”具体化为“清掉元数据位后必须报出”。块泄漏仍由宿主 `onyxfs.py fsck` 负责。
+4. 页数守恒加入了内核映像页：`NPAGE` 覆盖全部 RAM，而 `kinit()` 只释放 `end` 之后的内存，映像自身占用的页既不在空闲链表也不在 `live` 里。
+
+**验收结果**
+
+本机（WSL2 / Ubuntu 26.04 / QEMU 10.2.1 / riscv64-linux-gnu-gcc 15.2.0 / Python 3.12.16）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `make fmt && git diff --exit-code`（提交后） | 无差异 |
+| `make kernel/kernel fs.img` | 通过，3200 块 / 47 元数据块；镜像用到 2434 块，余 766 块 |
+| `python3 test-harness.py` / `test-auth.py` | 21 项 / 1 项通过 |
+| `python3 test-tools.py` | 30 项通过 |
+| `python3 test-tools.py --qemu` | 33 项通过；坏 nlink 镜像报 `violation: inode 2: nlink 2 but 1 directory entries name it`，坏位图镜像报 `violation: metadata block 1 is marked free in the bitmap`，两者退出码均为 1 |
+| `python3 test-xv6.py dedicated --cpus 1` | 14 项全部 PASS，`check` 1.492 s，`fslimit` 48.165 s，`tracetest` 21.775 s |
+| `python3 test-xv6.py dedicated --cpus 3` | 14 项全部 PASS，`check` 1.599 s，`fslimit` 56.532 s，`tracetest` 22.763 s |
+| `python3 test-xv6.py usertests --cpus 1` / `--cpus 3` | `ALL TESTS PASSED`，197.824 s / 199.933 s |
+| `python3 test-xv6.py crash --cpus 1` / `--cpus 3` | PASS，7.362 s / 7.68 s |
+| `python3 test-stage3.py --cpus 1` / `--cpus 3` | 均 PASS |
+| `python3 test-shell.py --cpus 1` / `--cpus 3` | syntax / memory / append / jobs 全部 PASS |
+| 同会话 `check --stats` → `fslimit 650` → `mixstress` → `cowtest` → `check --stats` | 前后完全一致：`fd=12 vma=0 inode_used=56 blocks_used=2434 inodes_used=56`，`violations=0` |
+| 单次扫描耗时（宿主侧连续 6 次计时） | 每次约 0.08 s（含命令回显与轮询，轮询间隔 20 ms） |
+| `fslimit --check`（同一会话末尾追加检查） | PASS |
+
+新增用例的有效性单独验证过：改掉 `README` 的 `nlink` 后 `check` 精确报出该 inode；清掉超级块位图位后报出元数据块；两者都在 QEMU 中实测，随后恢复镜像。`violations` 计数与退出码由 `testrun` 换算，宿主不需要解析文本才能判断成败。
+
+未执行：Linux CI 与 macOS 构建（本机为 WSL2）；合并前仍以 PR 的 Linux 单核/三核 CI 为准。
+
+**限制**
+
+- 报告是 best-effort 快照：扫描期间其他进程可以改变状态，单条违规可能是竞态而不是 bug。只在空闲/单用例环境下断言 `violations=0`。
+- 同一时刻只允许一个扫描；并发调用返回 -1，不排队等待。
+- inode/目录扫描是 O(inode 数 + 目录项数)，计数表按 `NINODES` 静态分配。若提高 `NINODES`，这份静态内存和扫描时间都会增长。
+- 不审计页表叶子与 `page_state` 的逐页引用关系（计划中的 16.2），也不检查块泄漏；前者成本高且需要跨核处理，后者仍由 `onyxfs.py fsck` 负责。
+- 读不了目录的镜像仍可能在读取阶段 panic（与计划第 5 条一致）；`check` 不承诺救回无法读取的镜像。
+- 不修复任何东西：修复仍走正常文件操作或 `mkfs`。

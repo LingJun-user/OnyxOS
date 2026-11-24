@@ -453,6 +453,67 @@ class QemuSmoke(unittest.TestCase):
                 image.write_bytes(original)
 
 
+class CheckImageSmoke(unittest.TestCase):
+    """Boot the kernel against an image with one planted inconsistency.
+
+    These are the negative half of batch 16's acceptance: a clean image
+    must scan clean (the `check` dedicated case covers that), and a known
+    corruption must be named precisely.  Each test edits a copy of
+    fs.img, boots once, runs `testrun check`, and restores the image.
+    """
+
+    def setUp(self):
+        self.image = ROOT / "fs.img"
+        if not self.image.exists() or not (ROOT / "kernel" / "kernel").exists():
+            self.skipTest("build kernel/kernel and fs.img first")
+
+    def assert_guest_check_fails(self, edit):
+        layout = onyxfs.Layout(ROOT)
+        harness = load("harness", ROOT / "test-xv6.py")
+        harness.config.cpus = 1
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / "fs.img"
+            shutil.copyfile(self.image, copy)
+            image = onyxfs.Image.open(copy, layout)
+            builder = onyxfs.Builder(image)
+            pattern = edit(image, builder, layout)
+            copy.write_bytes(bytes(builder.data))
+            original = self.image.read_bytes()
+            shutil.copyfile(copy, self.image)
+            try:
+                with harness.QEMU(False) as q:
+                    q.wait_shell()
+                    q.cmd("testrun check\n")
+                    q.monitor(pattern, timeout=60)
+                    q.monitor(r"^TEST RESULT check 1$", timeout=30)
+            finally:
+                self.image.write_bytes(original)
+
+    def test_check_names_a_wrong_nlink(self):
+        def edit(image, builder, layout):
+            target = image.lookup(layout.rootino, "README")
+            self.assertNotEqual(target, 0, "README is missing from the image")
+            dinode = image.inode(target)
+            self.assertEqual(dinode["nlink"], 1)
+            dinode["nlink"] = 2
+            builder.write_inode(target, dinode)
+            return (r"^violation: inode %d: nlink 2 but 1 directory entries "
+                    r"name it$" % target)
+
+        self.assert_guest_check_fails(edit)
+
+    def test_check_names_a_free_metadata_block(self):
+        def edit(image, builder, layout):
+            # The superblock is marked allocated by mkfs.  Clearing its bit
+            # cannot be noticed by comparing counters -- both are read off
+            # the same bitmap -- so this is what the layout rule is for.
+            self.assertEqual(builder.bit(1), 1)
+            builder.set_bit(1, 0)
+            return r"^violation: metadata block 1 is marked free in the bitmap$"
+
+        self.assert_guest_check_fails(edit)
+
+
 def build_suite(with_qemu):
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -461,7 +522,7 @@ def build_suite(with_qemu):
             continue
         if case in (unittest.TestCase, unittest.FunctionTestCase):
             continue
-        if case is QemuSmoke and not with_qemu:
+        if case in (QemuSmoke, CheckImageSmoke) and not with_qemu:
             continue
         suite.addTests(loader.loadTestsFromTestCase(case))
     return suite

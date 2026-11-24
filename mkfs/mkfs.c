@@ -21,7 +21,8 @@
   } while (0)
 #endif
 
-#define NINODES 200
+// NINODES comes from kernel/param.h, next to FSSIZE: the superblock the
+// kernel reads and the tables check() sizes itself against must agree.
 
 // Permission bits for what mkfs writes.  On the host every binary is
 // named _something, so that the build system does not run it by

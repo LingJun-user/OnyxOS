@@ -126,6 +126,15 @@ fscount_scan(int dev)
   __atomic_store_n(&fs_nused_inodes, ni, __ATOMIC_RELAXED);
 }
 
+// Snapshot the O(1) allocation counters for check().  The reference
+// implementation is fscount_walk(); comparing the two is the point.
+void
+fscount_get(uint64 *nblocks, uint64 *ninodes)
+{
+  *nblocks = __atomic_load_n(&fs_nused_blocks, __ATOMIC_RELAXED);
+  *ninodes = __atomic_load_n(&fs_nused_inodes, __ATOMIC_RELAXED);
+}
+
 // Snapshot file system usage for df.  Totals come from the superblock;
 // used counts come from the O(1) counters.  Both free counts are
 // clamped: a counter can sit one transaction ahead of the disk, and

@@ -40,8 +40,10 @@ void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
+int             file_snapshot(struct file*, int*);
 
 // fs.c
+extern struct superblock sb;
 void            fsinit(int);
 int             dirlink(struct inode*, char*, uint);
 struct inode*   dirlookup(struct inode*, char*, uint*);
@@ -64,6 +66,7 @@ void            itrunc(struct inode*);
 void            ireclaim(int);
 void            fscount_scan(int);
 void            fscount_walk(int, uint64*, uint64*);
+void            fscount_get(uint64*, uint64*);
 void            fsinfo(struct fsstat*);
 
 // kalloc.c
@@ -77,6 +80,7 @@ uint64          krefs(void);
 void            kinit(void);
 uint64          freemem_walk(void);
 void            kalloc_stats(uint64*, uint64*, uint64*);
+void            kmem_snapshot(uint64*, uint64*, uint64*, uint64*);
 uint64          freemem(void);
 
 // log.c
@@ -84,6 +88,7 @@ void            initlog(int, struct superblock*);
 void            log_write(struct buf*);
 void            begin_op(void);
 void            end_op(void);
+int             log_check(int*, uint*);
 
 // pipe.c
 int             pipealloc(struct file**, struct file**);
@@ -178,6 +183,9 @@ void            argaddr(int, uint64 *);
 int             fetchstr(uint64, char*, int);
 int             fetchaddr(uint64, uint64*);
 void            syscall();
+
+// check.c
+int             kcheck(pagetable_t, uint64, uint64, int);
 
 // trace.c
 void            traceinit(void);

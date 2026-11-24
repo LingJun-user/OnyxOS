@@ -259,3 +259,36 @@ sys_sync(void)
   release(&log.lock);
   return 0;
 }
+
+// Validate the in-memory log header for check().  On return *n is the
+// header's length and *badblock is the first destination block that is
+// outside the image (0 when the header is plausible).  Returns 0 when the
+// header is in range, -1 otherwise.
+//
+// A committed header does not stay non-empty between operations: commit()
+// clears it, and an interrupted one is replayed by recover_from_log() at
+// boot.  A header that is out of range therefore means the log was
+// corrupted, not that a transaction is in flight.
+int
+log_check(int *n, uint *badblock)
+{
+  int i;
+
+  *badblock = 0;
+  acquire(&log.lock);
+  *n = log.lh.n;
+  if (*n < 0 || *n > LOGBLOCKS) {
+    release(&log.lock);
+    return -1;
+  }
+  for (i = 0; i < *n; i++) {
+    int b = log.lh.block[i];
+    if (b < 0 || (uint)b >= sb.size) {
+      *badblock = (uint)b;
+      release(&log.lock);
+      return -1;
+    }
+  }
+  release(&log.lock);
+  return 0;
+}
