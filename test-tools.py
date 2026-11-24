@@ -572,7 +572,7 @@ class CheckImageSmoke(unittest.TestCase):
         if not self.image.exists() or not (ROOT / "kernel" / "kernel").exists():
             self.skipTest("build kernel/kernel and fs.img first")
 
-    def assert_guest_check_fails(self, edit):
+    def assert_guest_check_fails(self, edit, allocate_block=False):
         layout = onyxfs.Layout(ROOT)
         harness = load("harness", ROOT / "test-xv6.py")
         harness.config.cpus = 1
@@ -588,6 +588,9 @@ class CheckImageSmoke(unittest.TestCase):
             try:
                 with harness.QEMU(False) as q:
                     q.wait_shell()
+                    if allocate_block:
+                        q.cmd("testrun mkdir /kcheck-alloc\n")
+                        q.monitor(r"^TEST RESULT mkdir 0$", timeout=30)
                     q.cmd("testrun check\n")
                     q.monitor(pattern, timeout=60)
                     q.monitor(r"^TEST RESULT check 1$", timeout=30)
@@ -616,7 +619,7 @@ class CheckImageSmoke(unittest.TestCase):
             builder.set_bit(1, 0)
             return r"^violation: metadata block 1 is marked free in the bitmap$"
 
-        self.assert_guest_check_fails(edit)
+        self.assert_guest_check_fails(edit, allocate_block=True)
 
 
 def build_suite(with_qemu):
