@@ -123,14 +123,16 @@ sys_munmap(void)
     close = v->file;
     memset(v, 0, sizeof(*v));
   } else if (start == v->start) {
-    v->offset += len;
+    if (v->file)
+      v->offset += len;
     v->start = end;
   } else if (end == v->end) {
     v->end = start;
   } else {
     p->vmas[spare] = *v;
     p->vmas[spare].start = end;
-    p->vmas[spare].offset += end - v->start;
+    if (v->file)
+      p->vmas[spare].offset += end - v->start;
     v->end = start;
   }
   release(&p->lock);

@@ -302,8 +302,15 @@ kmem_snapshot(uint64 *total, uint64 *nfree, uint64 *walk, uint64 *live)
   uint64 n = 0;
 
   acquire(&kmem.lock);
-  for (r = kmem.freelist; r; r = r->next)
+  for (r = kmem.freelist; r; r = r->next) {
+    uint64 pa = (uint64)r;
+    if (pa < PGROUNDUP((uint64)end) || pa >= PHYSTOP || pa % PGSIZE ||
+        n >= NPAGE) {
+      n = NPAGE + 1;
+      break;
+    }
     n++;
+  }
   *total = NPAGE;
   *nfree = kmem.nfree;
   *walk = n;

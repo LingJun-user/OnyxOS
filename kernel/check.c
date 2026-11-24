@@ -354,7 +354,8 @@ check_inodes(void)
     check_addrs(inum, &d);
     if (d.type == T_DIR) {
       dir_count++;
-      scan_dir(inum, &d);
+      if (d.size <= MAXFILE * BSIZE)
+        scan_dir(inum, &d);
     }
   }
 
