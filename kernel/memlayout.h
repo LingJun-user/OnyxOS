@@ -21,9 +21,13 @@
 #define UART0     0x10000000L
 #define UART0_IRQ 10
 
-// virtio mmio interface
+// virtio mmio interface.  qemu's virt machine places eight slots here,
+// one every 0x1000 bytes, with IRQ 1 + slot.  Slot 0 is the disk; slot 1
+// is only populated by `make dev' (the devlink virtio-serial port).
 #define VIRTIO0     0x10001000
 #define VIRTIO0_IRQ 1
+#define VIRTIO1     0x10002000
+#define VIRTIO1_IRQ 2
 
 // core-local interrupt controller (CLINT)
 #define CLINT_BASE  0x02000000L

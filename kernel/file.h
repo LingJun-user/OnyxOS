@@ -42,3 +42,4 @@ struct devsw {
 extern struct devsw devsw[];
 
 #define CONSOLE 1
+#define AGENT   2 // devlink control channel, `/dev/agent'

@@ -239,6 +239,12 @@ void            plicinithart(void);
 int             plic_claim(void);
 void            plic_complete(int);
 
+// virtio_console.c
+void            virtio_console_init(void);
+void            virtio_console_intr(void);
+int             agentread(int, uint64, int);
+int             agentwrite(int, uint64, int);
+
 // virtio_disk.c
 void            virtio_disk_init(void);
 void            disk_stats(uint64*, uint64*);

@@ -570,3 +570,79 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 - 不审计页表叶子与 `page_state` 的逐页引用关系（计划中的 16.2），也不检查块泄漏；前者成本高且需要跨核处理，后者仍由 `onyxfs.py fsck` 负责。
 - 读不了目录的镜像仍可能在读取阶段 panic（与计划第 5 条一致）；`check` 不承诺救回无法读取的镜像。
 - 不修复任何东西：修复仍走正常文件操作或 `mkfs`。
+
+### 批次 17 — DevLink：宿主与客户机的控制通道
+
+目标不是“多一个命令”，而是同一个 QEMU 会话内改程序、传程序、跑程序，不重启、不重建镜像。默认启动路径保持不变：只有 `make dev` 会把第二个 virtio-mmio 槽接到宿主 socket，普通 `make qemu` 不加载任何 DevLink 设备。
+
+**交付**
+
+| 文件 | 内容 |
+| --- | --- |
+| `kernel/virtio_console.c` | 槽 1 的 virtio-serial 驱动：RX/TX 两个队列、128 KiB 接收 FIFO、同步发送、`AGENT` 字符设备 |
+| `kernel/memlayout.h`、`kernel/vm.c`、`kernel/plic.c`、`kernel/trap.c` | `VIRTIO1 = 0x10002000`、IRQ 2、内核页表映射与中断分发 |
+| `kernel/file.h` | `AGENT` 主设备号 2 |
+| `user/agent.c` | 帧协议、`ping`/`exec`/`put`/`get`/`stat`/`klog`、分片与重同步 |
+| `user/init.c` | 启动时创建 `/dev`、`/dev/agent`，`chmod 0600`，fork/exec `agent` |
+| `Makefile` | `make dev`（`DEVSOCKET`，默认 `~/.onyx-dev/dev.sock`）、`make dev-reload`、`devlink-test`、`UPROGS`/`OBJS` |
+| `tools/onyxctl.py` | 仅标准库的宿主客户端与 CLI，含 `watch` 热重载 |
+| `test-devlink.py` | 端到端测试：自己启动 `make dev`，临时 socket，结束时杀掉整个进程组 |
+| `.github/workflows/test.yml` | 单核/三核 Linux job 增加 `python3 test-devlink.py` |
+| README、USER_GUIDE、help | 命令、开发接口边界与限制 |
+
+**协议**
+
+12 字节帧头，小端：
+
+| 字段 | 长度 | 说明 |
+| --- | --- | --- |
+| magic | 4 | `"ONYX"`（0x58594e4f） |
+| type | 1 | 1 ping、2 exec、3 put、4 get、5 stat、6 klog；响应置 0x80 |
+| flags | 1 | bit 0 表示同一请求还有后续帧 |
+| length | 2 | 本帧负载长度，单帧上限 4000 |
+| id | 4 | 请求编号，响应原样带回 |
+
+单次请求/响应上限 64 KiB，两个方向都支持分片。`exec` 的负载是 `argc` 加逐个长度前缀的参数；`put` 是路径、模式和文件内容；`get`/`stat` 只带路径；`klog` 带 seq 游标。`exec` 先按原样 `exec`，失败后再试 `/<name>`，与 Shell 的命令查找保持一致；引号、管道和变量展开由调用者自己拆分。
+
+`exec` 的实现按计划的第一版：子进程把 stdout/stderr 重定向到 `/dev/ag-output/stdout 和 /dev/ag-output/stderr`，退出后回传并删除，单路输出上限 32 KiB。没有做流式输出。
+
+**关键取舍与计划文字的差异**
+
+1. **`virtserialport` 换成 `virtconsole`**。QEMU 把 virtio-serial 的 0 号端口保留给 `virtconsole`：不带 `nr` 的 `virtserialport` 会拿到 1 号端口，数据进入队列 4，而 `guest_connected` 在非 multiport 模式下只会在 0 号端口上置位——结果是宿主的数据被静默丢弃。`nr=0` 会被 QEMU 直接拒绝（"reserved for virtconsole devices"）。因此 `make dev` 用 `-device virtconsole,chardev=devlink,name=agent`，端口 0、队列 0/1，刚好是计划想要的“单端口、不启用 multiport”。
+2. 不协商 `VIRTIO_CONSOLE_F_MULTIPORT`、`F_SIZE`、`F_EMERG_WRITE`，只接受 `VIRTIO_F_VERSION_1`（若设备提供）。没有控制队列。
+3. **接收 FIFO 定为 128 KiB，而不是几 KiB**。virtio-serial 没有流控：QEMU 只要还有已投递的描述符就继续写，FIFO 满后只能丢字节，而丢字节会让帧失步。单次请求上限 64 KiB，128 KiB 留出一倍余量；这个大小是协议契约的一部分，不是可随手调小的参数。
+4. **agent 在失步时重同步而不是退出**：宿主超时重试会重连并重发，客户机可能正停在旧帧的负载中间；按字节滑动直到帧头 magic 匹配，最多浪费一次请求，不会把整个调试通道打死。
+5. **宿主侧的失败诊断**：每个请求都有超时和独立 id；只读请求可在重连后用新 id 重发，exec 和 put 只发送一次。超时或断链时错误信息包含请求 id、尝试次数、帧内已收字节数和响应体已收字节数，便于区分“agent 没起来”“帧被截断”和“传到一半断链”。`klog` 支持 `--cursor-file` 与 `--follow`，游标按返回的 seq 写回文件，跨调用增量拉取；`put -` 从 stdin 读，`get -` 写 stdout；`watch` 可监视目录或单个 `.c` 文件。
+6. 没有新增系统调用：`exec`/文件操作复用既有调用，`klog` 复用 `klog()`，权限仍由 `/dev/agent` 的 0600 节点和既有文件权限检查决定。
+6. `check` 这一类“检查器”不修改状态的原则同样适用：驱动只在初始化和收发路径写设备寄存器与自己的队列，不碰文件系统。
+
+**验收结果**
+
+本机（WSL2 / Ubuntu 26.04 / QEMU 10.2.1 / gcc 15.2.0）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `make dev` 启动 | 探针打印 `devlink: virtio-serial ready, rxq=8 txq=8 descriptors=8, features=0:30000006` |
+| `make qemu` 普通启动 | 无 devlink 输出；`ps` 中没有 `agent`；`cat /dev/agent` 返回读错误，登录与既有流程不变 |
+| `python3 test-devlink.py` | 6 项全部 PASS：ping protocol=1、exec `testrun cowtest` 退出码 0、9000 字节 put/get SHA-256 一致、`/dev/agent` 模式 0600、热重载 516 ms、失败命令保留 127 |
+| `make dev-reload` / `onyxctl watch` 手工验证 | 保存 `user/echo.c` 后 532 ms 内打印新程序输出，QEMU 不重启、`fs.img` 不重建 |
+| `make kernel/kernel fs.img` | 通过；镜像 2471/3200 块，余 682 块 |
+| `test-harness.py` / `test-auth.py` / `test-tools.py` | 21 / 1 / 30 项通过 |
+| `test-xv6.py dedicated --cpus 1` / `3` | 13 项全部 PASS，`fslimit` 50.79 s / 55.96 s，`tracetest` 23.19 s / 22.99 s |
+| `test-xv6.py usertests --cpus 1` / `3` | `ALL TESTS PASSED`，206.19 s / 213.08 s |
+| `test-xv6.py crash --cpus 1` / `3` | PASS，9.49 s / 8.66 s |
+| `test-stage3.py`、`test-shell.py` 单核/三核 | 全部 PASS |
+
+`test-devlink.py` 自带 `make dev`：临时 socket、独立进程组，结束时先 SIGTERM 再按需 SIGKILL，并断言 QEMU 进程确实退出；串口输出写入 `test-results/`，失败时打印最后 25 行。
+
+未执行：Linux CI 与 macOS 构建（本机为 WSL2），合并前以 PR 的 Linux 单核/三核 CI 为准。
+
+**限制**
+
+- 这是本机开发接口：没有认证，不做网络监听；安全边界是“宿主本地 socket + root 客户机进程”。不要转发或暴露给不可信用户。
+- `/dev/agent` 只有 root 可读写；agent 串行处理请求，一次只有一个宿主连接。同时打开第二个读端会失败。
+- 单次请求/响应上限 64 KiB，`exec` 单路输出上限 32 KiB；超过上限的文件传输和输出会被拒绝或截断（`get` 拒绝，`exec` 截断）。
+- 接收 FIFO 满时丢弃字节并计数；协议失步后 agent 会重同步，但这次请求会失败。
+- 不使用 multiport，因此只有一个端口；`dev` 设备只在 `make dev` 下存在。
+- `exec` 依赖客户机 `/dev/ag-output` 可写（agent 启动时创建）；磁盘满时 exec 会以 127 或 126 失败并返回 stderr。
+- 热重载监视的是 `user/*.c` 的修改时间；`watch` 串行执行，保存后需要等当前这次运行结束才会处理下一次修改。

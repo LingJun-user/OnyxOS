@@ -1428,6 +1428,9 @@ cd /home/alice
 | 单处理器启动 | `make qemu CPUS=1` |
 | 查看项目版本 | `git rev-parse --short HEAD` |
 | 检查镜像是否需要重建 | `make -q fs.img`，再用 `echo $?` 查看结果 |
+| 启动带 DevLink 调试通道的客户机 | `make dev` |
+| 在另一个终端驱动该客户机 | `python3 tools/onyxctl.py ping`、`exec`、`put`、`get` |
+| 保存源码后自动重建并运行 | `make dev-reload` |
 | 清理并删除镜像，慎用 | `make clean` |
 
 ### 16.2 在 OnyxOS 内使用
@@ -1482,6 +1485,7 @@ cd /home/alice
 | 程序 | 大致用途 |
 | --- | --- |
 | `init`、`login`、`sh` | 系统启动、登录和命令窗口，通常自动启动 |
+| `agent` | DevLink 客户机端进程，由 `init` 启动；只在 `make dev` 的设备上工作，普通启动时立即退出 |
 | `cputest`、`waitxtest`、`priotest` | 检查程序运行时间和调度 |
 | `kmemtest`、`cowtest`、`mmaptest` | 检查内存功能 |
 | `idtest`、`permtest`、`privtest` | 检查身份和权限 |
