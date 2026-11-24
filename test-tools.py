@@ -265,12 +265,86 @@ class FsckTests(Workspace):
         self.assertIn("inode 2", result.stdout)
         self.assertIn("MAXFILE", result.stdout)
 
+    def test_invalid_log_location_returns_json_findings(self):
+        layout = onyxfs.Layout(ROOT)
+        offset = layout.bsize + layout.field("superblock", "logstart")["offset"]
+        image = self.corrupt(offset, "<I", layout.fssize)
+        result = cli("fsck", "--json", image)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("logstart", json.loads(result.stdout)["errors"][0]["message"])
+
     def test_dirty_log_is_reported(self):
         layout = onyxfs.Layout(ROOT)
         image = self.corrupt(2 * layout.bsize, "<i", 1)
         result = self.fsck(image)
         self.assertEqual(result.returncode, 1)
         self.assertIn("committed log", result.stdout)
+
+    def test_missing_direct_block_inside_the_file_is_an_error(self):
+        layout = onyxfs.Layout(ROOT)
+        image = onyxfs.Image.open(self.image, layout)
+        inum = image.lookup(layout.rootino, "hello.txt")
+        block = image.inode(inum)["addrs"][0]
+        self.assertTrue(block)
+        data = bytearray(self.image.read_bytes())
+        offset = (image.sb["inodestart"] * layout.bsize
+                  + inum // layout.ipb * layout.bsize
+                  + inum % layout.ipb * layout.dinode_size
+                  + layout.field("dinode", "addrs")["offset"])
+        struct.pack_into("<I", data, offset, 0)
+        base = image.sb["bmapstart"] * layout.bsize + block // 8
+        data[base] &= ~(1 << (block % 8)) & 0xFF
+        self.image.write_bytes(data)
+        result = self.fsck()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"inode {inum}: direct block 0 is missing", result.stdout)
+
+
+class IndirectFsckTests(Workspace):
+    files = {"big.bin": b"B" * (64 * 1024)}
+
+    def open_image(self):
+        layout = onyxfs.Layout(ROOT)
+        image = onyxfs.Image.open(self.image, layout)
+        inum = image.lookup(layout.rootino, "big.bin")
+        dinode = image.inode(inum)
+        self.assertGreater(dinode["size"] // layout.bsize, layout.ndirect)
+        return layout, image, inum, dinode, bytearray(self.image.read_bytes())
+
+    def inode_offset(self, layout, image, inum, field):
+        return (image.sb["inodestart"] * layout.bsize
+                + inum // layout.ipb * layout.bsize
+                + inum % layout.ipb * layout.dinode_size
+                + layout.field("dinode", field)["offset"])
+
+    def free_bit(self, layout, image, data, block):
+        base = image.sb["bmapstart"] * layout.bsize + block // 8
+        data[base] &= ~(1 << (block % 8)) & 0xFF
+
+    def test_missing_indirect_block_is_an_error(self):
+        layout, image, inum, dinode, data = self.open_image()
+        indirect = dinode["addrs"][layout.ndirect]
+        self.assertTrue(indirect)
+        struct.pack_into("<I", data,
+                         self.inode_offset(layout, image, inum, "addrs")
+                         + layout.ndirect * 4, 0)
+        self.free_bit(layout, image, data, indirect)
+        self.image.write_bytes(data)
+        result = self.fsck()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"inode {inum}: indirect block is missing", result.stdout)
+
+    def test_missing_indirect_entry_inside_the_file_is_an_error(self):
+        layout, image, inum, dinode, data = self.open_image()
+        table = dinode["addrs"][layout.ndirect]
+        block = struct.unpack_from("<I", data, table * layout.bsize)[0]
+        self.assertTrue(block)
+        struct.pack_into("<I", data, table * layout.bsize, 0)
+        self.free_bit(layout, image, data, block)
+        self.image.write_bytes(data)
+        result = self.fsck()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"inode {inum}: indirect entry 0 is missing", result.stdout)
 
 
 class PutTests(Workspace):
@@ -283,6 +357,18 @@ class PutTests(Workspace):
         self.assertClean()
         self.assertEqual(self.cat("/note.txt"), source.read_bytes())
         self.assertEqual(self.cat("/hello.txt"), before)
+
+    def test_concurrent_puts_keep_every_file(self):
+        names = [f"dest{i}" for i in range(8)]
+        with tempfile.TemporaryFile() as log:
+            writers = [subprocess.Popen(
+                [sys.executable, str(TOOLS / "onyxfs.py"), "put",
+                 self.image, self.tmp / "hello.txt", name],
+                stdout=log, stderr=log) for name in names]
+            self.assertEqual([writer.wait() for writer in writers], [0] * len(names))
+        for name in names:
+            self.assertEqual(self.cat("/" + name), self.files["hello.txt"])
+        self.assertClean()
 
     def test_put_leaves_no_temporary_file(self):
         source = self.tmp / "note.txt"
@@ -310,7 +396,26 @@ class PutTests(Workspace):
         self.assertEqual(hashlib.sha256(self.cat("/big.bin")).hexdigest(),
                          hashlib.sha256(payload).hexdigest())
 
-    def test_put_grows_the_root_directory(self):
+    def test_put_does_not_trust_the_old_contents_of_a_reused_block(self):
+        layout = onyxfs.Layout(ROOT)
+        image = onyxfs.Image.open(self.image, layout)
+        nmeta = (image.sb["bmapstart"] + image.sb["size"] // layout.bpb + 1)
+        data = bytearray(self.image.read_bytes())
+        for block in range(nmeta, image.sb["size"]):
+            if not image._bit(block):
+                start = block * layout.bsize
+                data[start:start + layout.bsize] = b"X" * layout.bsize
+        self.image.write_bytes(data)
+        self.assertClean()
+        source = self.tmp / "reuse.bin"
+        payload = b"Z" * (layout.bsize * (layout.ndirect + 1))
+        source.write_bytes(payload)
+        result = self.put(source)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertClean()
+        self.assertEqual(self.cat("/reuse.bin"), payload)
+
+
         for index in range(24):
             source = self.tmp / f"g{index}"
             source.write_bytes(b"payload")
@@ -467,7 +572,7 @@ class CheckImageSmoke(unittest.TestCase):
         if not self.image.exists() or not (ROOT / "kernel" / "kernel").exists():
             self.skipTest("build kernel/kernel and fs.img first")
 
-    def assert_guest_check_fails(self, edit):
+    def assert_guest_check_fails(self, edit, allocate_block=False):
         layout = onyxfs.Layout(ROOT)
         harness = load("harness", ROOT / "test-xv6.py")
         harness.config.cpus = 1
@@ -483,6 +588,9 @@ class CheckImageSmoke(unittest.TestCase):
             try:
                 with harness.QEMU(False) as q:
                     q.wait_shell()
+                    if allocate_block:
+                        q.cmd("testrun mkdir /kcheck-alloc\n")
+                        q.monitor(r"^TEST RESULT mkdir 0$", timeout=30)
                     q.cmd("testrun check\n")
                     q.monitor(pattern, timeout=60)
                     q.monitor(r"^TEST RESULT check 1$", timeout=30)
@@ -511,7 +619,7 @@ class CheckImageSmoke(unittest.TestCase):
             builder.set_bit(1, 0)
             return r"^violation: metadata block 1 is marked free in the bitmap$"
 
-        self.assert_guest_check_fails(edit)
+        self.assert_guest_check_fails(edit, allocate_block=True)
 
 
 def build_suite(with_qemu):

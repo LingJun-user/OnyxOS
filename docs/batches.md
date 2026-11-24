@@ -359,7 +359,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | --- | --- |
 | `tools/onyxfs.py` | `ls` / `cat` / `stat` / `fsck` / `put`，`--json` |
 | `tools/symbolize.py` | `0x...`、`文件:地址`、stdin → `<prefix>addr2line -f -C -e <elf>` |
-| `test-tools.py` | `unittest`：布局推导、坏 magic/旧 magic、截断、脏日志、位图泄漏、inode 越界、`put` 前后一致性与文件模式、头解析失败、符号化；`--qemu` 追加一次客户机回读 |
+| `test-tools.py` | `unittest`：布局推导、坏 magic/旧 magic、截断、脏日志、位图泄漏、inode 越界、`size` 范围内缺失的直接块/间接块/间接项、`put` 复用含旧数据的空闲块、`put` 前后一致性与文件模式、头解析失败、符号化；`--qemu` 追加一次客户机回读 |
 
 **布局常量不硬编码**
 
@@ -373,7 +373,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 2. 日志：头部的 `n` 必须在 `[0, nlog)`，非 0 表示有未提交事务，按错误报出（宿主不重放日志）；
 3. 位图：元数据块必须占用、镜像末尾之后的位必须为 0、被 inode 引用的块必须在数据区内且已标记；
 4. inode：类型合法、`nlink ≥ 1`、大小不超过 `MAXFILE * BSIZE`、设备节点大小为 0、目录大小是目录项大小的整数倍；
-5. 地址：直接块与间接块都要落在数据区并被位图标记，同一块被两处引用报"已被谁使用"；间接项在文件末尾之后仍被分配时给警告；
+5. 地址：直接块与间接块都要落在数据区并被位图标记，同一块被两处引用报"已被谁使用"；`size` 范围内的直接块、间接块或间接表项缺失一律报错（文件系统没有稀疏文件语义）；
 6. 目录：从根遍历，`. ` 与 `..` 的位置和指向、重名、空名、带 `/` 的名字、指向空闲 inode 的项、同一目录被两个父目录引用；
 7. `nlink`：目录按 `1 + 子目录数`、普通文件按目录项引用数核对；分配了却不可达的 inode 单独报出；
 8. 泄漏：位图标为占用但没有任何 inode 引用的数据块逐个报出。
@@ -400,8 +400,8 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `make mkfs/mkfs kernel/kernel fs.img` | 通过，3200 块 / 47 元数据块 |
 | `python3 test-harness.py` | 21 项通过 |
 | `python3 test-auth.py` | 1 项通过 |
-| `python3 test-tools.py` | 30 项通过，约 5.9 秒 |
-| `python3 test-tools.py --qemu` | 31 项通过，约 7.2 秒（含一次客户机启动与 `cat` 回读） |
+| `python3 test-tools.py` | 33 项通过，约 6.2 秒 |
+| `python3 test-tools.py --qemu` | 34 项通过，约 7.3 秒（含一次客户机启动与 `cat` 回读） |
 | `python3 tools/onyxfs.py fsck fs.img` | 退出码 0，`clean` |
 | `python3 tools/symbolize.py --kernel 0x80000af2` | `panic at ./kernel/printk.c:231` |
 | `python3 test-shell.py --cpus 1` | syntax / memory / append / jobs 全部 PASS |
@@ -428,7 +428,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 
 `struct trace_entry` 为 96 字节（`tick`、`ret`、`args[3]`、`pid`、`ppid`、`uid`、`syscall`、`mode`、`flags`、`seq`、`path[32]`），环共 96 KiB 静态内存。记录点只在 `syscall()`：入口写 ENTER、参数与路径，返回写 EXIT 与返回值；进程在本次调用中关闭 trace 时，只留入口、不写出口。
 
-写者由 `trace_lock` 串行化：每个记录在持锁期间领取唯一索引、把槽位的 `seq` 置 0、填完记录后以 release 写入最终序号，再以 release 前移写索引，因此两个 hart 不会写到同一个槽位，较晚完成的旧写者也不能把索引改回去。读者不取锁（panic 必须能读），acquire 读取序号，复制后再次校验；正在被覆盖的槽位直接跳过，因此不会把半个记录交给用户。环回绕时新记录覆盖旧记录，`traceread` 通过 `lost` 返回自上次 `TRACE_CLEAR` 以来被覆盖的记录总数（单调增加），并在 `trace` 命令中按增量提示。
+写者由 `trace_lock` 串行化：每个记录在持锁期间领取唯一索引、把槽位的 `seq` 置 0、填完记录后以 release 写入最终序号，再以 release 前移写索引，因此两个 hart 不会写到同一个槽位，较晚完成的旧写者也不能把索引改回去。普通读取逐槽加锁复制，释放锁后校验窗口期望序号，再按 UID 过滤并复制到用户态。panic 转储保持无锁，复制前后校验序号。已被覆盖的窗口槽位直接跳过。路径保留前 31 字节，定长字段的剩余字节清零。环回绕时新记录覆盖旧记录，`traceread` 通过 `lost` 返回自上次 `TRACE_CLEAR` 以来被覆盖的记录总数（单调增加），并在 `trace` 命令中按增量提示。
 
 路径类调用（`open`、`mknod`、`unlink`、`link`、`mkdir`、`chdir`、`exec`、`chmod`、`chown`）在入口用最多 31 字节的 `fetchstr` 复制路径；复制失败就把路径清空，不影响系统调用本身。EXIT 记录复用栈上已复制的路径，不再第二次读取用户内存，因此 `exec` 成功后也能显示被执行的路径。
 
@@ -451,7 +451,7 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 
 **`trace` 命令**
 
-输出固定为 `pid ppid name(args) = ret`；路径类调用的第一个参数显示为带引号的路径，其余参数以十六进制显示，返回值按十进制显示。`-e` 只过滤显示（记录仍在环里），`-o` 写入文件而不是控制台，`-p PID` 附着到已存在的进程并轮询到它退出。命令模式在子进程 `exec` 前开启标志，父进程用 `psinfo` 判断目标是否仍在运行，每 tick 排空一次环，目标结束后再排空一次并以其退出码退出。
+输出固定为 `pid ppid name(args) = ret`；路径类调用的第一个参数显示为带引号的路径，其余参数以十六进制显示，返回值按十进制显示。`-e` 只过滤显示（记录仍在环里），`-o` 写入文件而不是控制台，`-p PID` 附着到已存在的进程并持续跟踪它及其后代。命令模式在子进程 `exec` 前开启标志，父进程每 tick 排空一次环，通过成功的 `fork` 返回值登记子 PID，即使子进程被重新收养也能继续追踪。所有已识别目标退出后，最后排空一次环，复查新发现的后代，并返回直接目标的退出码。
 
 排空时命令只打印目标及其后代：目标 pid 在启动时加入集合，之后按记录顺序检查 `ppid`，父进程已知的记录把它的 `pid` 也加入集合。因此同一台机器上并行运行的多个 `trace` 不会互相混入输出，root 也不会把其他 UID 的追踪记录写进某个目标的结果；集合最多保存 1,024 个 pid。`-f` 只说明这一继承行为。
 
@@ -487,7 +487,7 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 - `TRACE_CLEAR` 会让并发 `traceread` 的 `seq` 游标失效：清空后序号从 1 重新开始，正在运行的 `trace` 命令需要重启。写者本身不再与 CLEAR 竞态。
 - `ppid` 在记录时未持有 `wait_lock`，并发被收养时可能显示新的父进程；这与 trace 的 best-effort 定位一致。
 - `trace` 命令轮询周期为一个 tick，目标在两次轮询之间产生超过 1,024 条记录时会丢记录；`-o` 也只写实际读到的部分。
-- `trace -p` 只能等待目标退出，不能中途停止；需要提前结束时由目标自身退出或从另一个终端杀掉目标。
+- `trace -p` 会等待目标及已识别的后代退出，不能中途停止；需要提前结束时由目标自身退出或从另一个终端杀掉目标。
 - 不把 trace 当作安全审计或持久化日志：环会覆盖，panic 输出允许不完整，非 root 只能看到自己的记录。
 
 ### 批次 16 — 内核不变式检查

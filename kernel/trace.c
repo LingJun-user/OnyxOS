@@ -4,15 +4,11 @@
 // off unless a process asks for it with tracectl(), so the default path
 // costs one branch per syscall and nothing else.
 //
-// Writers are serialised by trace_lock so that two harts can never claim
-// the same index or interleave the fields of one record.  Readers stay
-// lock-free because panic() must be able to read the ring without taking a
-// lock or allocating memory.  A writer marks its slot in progress (seq =
-// 0), fills the record, publishes the final sequence, then advances the
-// write index with a release store.  A reader copies a record and checks
-// that its sequence did not change; a slot being overwritten is skipped
-// rather than reported torn.  This is a diagnostic stream, not a reliable
-// audit log.
+// Writers and ordinary readers hold trace_lock while copying one slot.
+// Each reader checks the slot against its expected sequence in the window.
+// Panic reads without locking. Writers invalidate the sequence before
+// changing the payload and publish it after all fields are in place, so
+// the panic reader can skip slots that change during its copy.
 
 #include "types.h"
 #include "param.h"
@@ -97,7 +93,8 @@ trace_record(int num, int flags, uint64 ret, uint64 a0, uint64 a1, uint64 a2,
   w = trace_w;
   e = &tracebuf[w % TRACE_NENT];
 
-  __atomic_store_n(&e->seq, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&e->seq, 0, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
   e->tick = p->u_ticks + p->k_ticks;
   e->ret = ret;
   e->args[0] = a0;
@@ -113,7 +110,7 @@ trace_record(int num, int flags, uint64 ret, uint64 a0, uint64 a1, uint64 a2,
   e->syscall = num;
   e->mode = TRACE_MODE_SYSCALL;
   e->flags = flags;
-  safestrcpy(e->path, path ? path : "", TRACE_PATH);
+  strncpy(e->path, path ? path : "", sizeof(e->path));
   __atomic_store_n(&e->seq, (uint32)(w + 1), __ATOMIC_RELEASE);
   __atomic_store_n(&trace_w, w + 1, __ATOMIC_RELEASE);
   release(&trace_lock);
@@ -159,11 +156,12 @@ trace_panic_dump(struct proc *p)
     uint32 s1, s2;
 
     s1 = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
-    if (s1 == 0) {
+    if (s1 == 0 || s1 != (uint32)(w - avail + i + 1)) {
       partial = 1;
       continue;
     }
     tmp = *e;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
     s2 = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
     if (s1 != s2 || s2 == 0) {
       partial = 1;
@@ -260,14 +258,10 @@ ktraceread(pagetable_t pagetable, uint64 psz, uint64 uaddr, int max,
   for (i = 0; i < (uint64)max; i++) {
     struct trace_entry *e = &tracebuf[(start + i) % TRACE_NENT];
     struct trace_entry tmp;
-    uint32 s1, s2;
-
-    s1 = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
-    if (s1 == 0)
-      continue;
+    acquire(&trace_lock);
     tmp = *e;
-    s2 = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
-    if (s1 != s2 || s2 == 0)
+    release(&trace_lock);
+    if (tmp.seq == 0 || tmp.seq != (uint32)(start + i + 1))
       continue;
     if (cur->uid != 0 && tmp.uid != cur->uid)
       continue;

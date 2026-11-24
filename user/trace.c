@@ -167,6 +167,8 @@ drain(void)
       continue;
     if (!(e->flags & TRACE_EXIT))
       continue;
+    if (e->syscall == SYS_fork && (int)e->ret > 0)
+      track((int)e->ret);
     if (!wanted(e->syscall))
       continue;
     emit(e);
@@ -194,18 +196,38 @@ baseline(void)
 }
 
 static int
-alive(int pid)
+tree_alive(void)
 {
   int i, n;
 
   n = psinfo(psnap, NPROC);
-  if (n < 0)
-    return 0;
+  if (n < 0) {
+    fprintf(2, "trace: psinfo failed\n");
+    exit(1);
+  }
   for (i = 0; i < n; i++)
-    if (psnap[i].pid == pid && psnap[i].state != PSTATE_UNUSED &&
+    if (tracked_pid(psnap[i].pid) && psnap[i].state != PSTATE_UNUSED &&
         psnap[i].state != PSTATE_ZOMBIE)
       return 1;
   return 0;
+}
+
+static void
+follow_tree(void)
+{
+  for (;;) {
+    drain();
+    if (!tree_alive()) {
+      // A parent may have forked and exited between drain and psinfo.
+      // Once all known processes are gone their fork records are final.
+      int known = ntracked;
+      drain();
+      if (ntracked == known)
+        return;
+      continue;
+    }
+    pause(1);
+  }
 }
 
 int
@@ -249,11 +271,7 @@ main(int argc, char **argv)
       fprintf(2, "trace: cannot trace pid %d\n", pid);
       exit(1);
     }
-    while (alive(pid)) {
-      drain();
-      pause(1);
-    }
-    drain();
+    follow_tree();
     exit(0);
   }
 
@@ -273,11 +291,7 @@ main(int argc, char **argv)
   }
 
   track(child);
-  while (alive(child)) {
-    drain();
-    pause(1);
-  }
+  follow_tree();
   wait(&status);
-  drain();
   exit(status);
 }
