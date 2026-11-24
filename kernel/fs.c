@@ -126,6 +126,15 @@ fscount_scan(int dev)
   __atomic_store_n(&fs_nused_inodes, ni, __ATOMIC_RELAXED);
 }
 
+// Snapshot the O(1) allocation counters for check().  The reference
+// implementation is fscount_walk(); comparing the two is the point.
+void
+fscount_get(uint64 *nblocks, uint64 *ninodes)
+{
+  *nblocks = __atomic_load_n(&fs_nused_blocks, __ATOMIC_RELAXED);
+  *ninodes = __atomic_load_n(&fs_nused_inodes, __ATOMIC_RELAXED);
+}
+
 // Snapshot file system usage for df.  Totals come from the superblock;
 // used counts come from the O(1) counters.  Both free counts are
 // clamped: a counter can sit one transaction ahead of the disk, and
@@ -172,21 +181,24 @@ bzero(int dev, int bno)
 static uint
 balloc(uint dev)
 {
-  int b, bi, m;
+  uint first = sb.size - sb.nblocks;
+  int m;
   struct buf *bp;
 
-  bp = 0;
-  for (b = 0; b < sb.size; b += BPB) {
+  // A damaged bitmap must never turn a metadata block into file data.
+  for (uint b = first; b < sb.size;) {
     bp = bread(dev, BBLOCK(b, sb));
-    for (bi = 0; bi < BPB && b + bi < sb.size; bi++) {
+    uint base = b - b % BPB;
+    for (; b < sb.size && b - base < BPB; b++) {
+      uint bi = b - base;
       m = 1 << (bi % 8);
       if ((bp->data[bi / 8] & m) == 0) { // Is block free?
         bp->data[bi / 8] |= m;           // Mark block in use.
         log_write(bp);
         __atomic_fetch_add(&fs_nused_blocks, 1, __ATOMIC_RELAXED);
         brelse(bp);
-        bzero(dev, b + bi);
-        return b + bi;
+        bzero(dev, b);
+        return b;
       }
     }
     brelse(bp);

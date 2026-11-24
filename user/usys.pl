@@ -73,3 +73,5 @@ entry("munmap");
 
 entry("tracectl");
 entry("traceread");
+
+entry("kcheck");

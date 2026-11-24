@@ -51,3 +51,5 @@
 
 #define SYS_tracectl  49
 #define SYS_traceread 50
+
+#define SYS_kcheck 51

@@ -123,6 +123,7 @@ QEMU 默认参数为 `-m 128M -smp 3`，可用 `make qemu CPUS=1` 改变 hart �
 | `fslimit [n]` | 目录与容量边界自检：跨间接块、上限推导、inode / 块耗尽与名字截断 |
 | `trace [-f] [-o file] [-e call,...] command` | 系统调用飞行记录：按 pid/ppid 打印参数、路径与返回值；`-p PID` 附着到已有进程 |
 | `tracetest` | 飞行记录器自检：失败调用、ppid、按 pid 附着、关闭、权限过滤、回绕、并发写者与 CLEAR |
+| `check [--stats]` | 内核不变式检查：进程表、VMA、fd、inode/目录、位图、日志头与页分配器；`--stats` 只打印计数 |
 
 ---
 
@@ -177,6 +178,7 @@ cat addresses.txt | python3 tools/symbolize.py   # 也可从 stdin 读
 | 虚拟内存映射 | `mmap()` / `munmap()` → `mmaptest` |
 | 目录与容量边界 | `fsinfo()` 会计 + 边界断言 → `fslimit` |
 | 系统调用飞行记录与 panic 现场 | `tracectl()` / `traceread()` → `trace` / `tracetest` |
+| 内核不变式检查（诊断快照） | `kcheck()` → `check` |
 | 宿主镜像工具与符号化 | `tools/onyxfs.py`（`ls`/`cat`/`stat`/`fsck`/`put`）、`tools/symbolize.py` → `test-tools.py` |
 
 ### Shell 重定向与错误处理
@@ -219,6 +221,7 @@ cat addresses.txt | python3 tools/symbolize.py   # 也可从 stdin 读
 | 48 | `SYS_munmap` | `int munmap(void *addr, uint64 len)` |
 | 49 | `SYS_tracectl` | `int tracectl(int op, int pid)` |
 | 50 | `SYS_traceread` | `int traceread(struct trace_entry *buf, int max, uint64 *lost)` |
+| 51 | `SYS_kcheck` | `int kcheck(char *buf, int max)` |
 
 ### 虚拟内存映射用法
 
@@ -273,7 +276,8 @@ python3 test-shell.py --cpus 3
 ./test-xv6.py crash --cpus 3
 ```
 
-- `dedicated` 集合：`cowtest`、`kmemtest`、`waitxtest`、`cputest`、`priotest`、`idtest`、`permtest`、`privtest`、`mmaptest`、`mixstress`、`sigtest`、`fslimit`、`tracetest`。
+- `dedicated` 集合：`cowtest`、`kmemtest`、`waitxtest`、`cputest`、`priotest`、`idtest`、`permtest`、`privtest`、`mmaptest`、`mixstress`、`sigtest`、`fslimit`、`tracetest`、`check`。
+- `test-xv6.py --check` 在每个专用用例成功后，于同一 QEMU 会话末尾执行 `testrun check --stats`，默认关闭。
 - 所有 QEMU 测试先认证为 root；每次运行都会重新生成 `fs.img`。
 - 每个专用测试默认超时 120 秒，完整 `usertests` 为 600 秒，可用 `--timeout` 调整。
 - `--repeat` 只做重复验证，失败不自动重试。
@@ -308,6 +312,8 @@ python3 test-shell.py --cpus 3
 - **`psinfo()` 成本随进程规模增长**：快照期间对每个进程持 `p->lock` 遍历页表，映射页多的进程会让 `top` 变慢。
 - **调度器每 tick 做一次 O(NPROC) 全表扫描**：优先级不继承，子进程从默认优先级开始，需显式 `setprio`。
 - **日志是诊断输出，不是可靠通道**：环形缓冲区在拷贝期间回绕时，输出尾部可能是新旧文本的混合。
+- **`check` 是诊断快照，不是原子快照**：只在 root、同一时刻只允许一个扫描，结果在系统空闲时最可靠；并发修改可能造成单条假阳性。它只报告不修复，最多记录 16 条违规，其余只计数。
+- **`check` 的位图自洽不是“开机后可独立验证”的**：`fs_nused_blocks` / `fs_nused_inodes` 在启动时按位图和 inode 表重新校准，所以两者在运行中天然一致；真正能查出的是**元数据块被标成空闲**这类布局违规。位图与 inode 引用之间的泄漏仍由宿主 `onyxfs.py fsck` 检查。
 
 ---
 

@@ -100,3 +100,6 @@ void free(void *);
 #include "kernel/mman.h"
 void *mmap(void *, uint64, int, int, int, uint64);
 int munmap(void *, uint64);
+
+// check.c
+int kcheck(char *, int);

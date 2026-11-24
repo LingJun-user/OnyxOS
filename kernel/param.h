@@ -10,8 +10,12 @@
 #define LOGBLOCKS   (MAXOPBLOCKS * 3) // max data blocks in on-disk log
 #define NBUF        (MAXOPBLOCKS * 3) // size of disk block cache
 #define FSSIZE      3200              // size of file system in blocks
-#define MAXPATH     128               // maximum file path name
-#define USERSTACK   1                 // user stack pages
+// Inode slots on the device.  mkfs writes this into the superblock, so it
+// lives with the other layout constants; the kernel needs the same number
+// for the fixed-size tables of the check() invariant scanner.
+#define NINODES   200
+#define MAXPATH   128 // maximum file path name
+#define USERSTACK 1   // user stack pages
 
 // 3200 blocks: 47 metadata + 3153 data, still one bitmap block. Local
 // builds use about 2047 total blocks including authentication/test programs,
