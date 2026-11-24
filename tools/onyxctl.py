@@ -42,7 +42,7 @@ R_MASK = 0x80
 NAMES = {T_PING: "ping", T_EXEC: "exec", T_PUT: "put", T_GET: "get",
          T_STAT: "stat", T_KLOG: "klog"}
 
-DEFAULT_SOCKET = os.environ.get("DEVSOCKET", "/tmp/onyx-dev.sock")
+DEFAULT_SOCKET = os.environ.get("DEVSOCKET", str(Path.home() / ".onyx-dev" / "dev.sock"))
 DEFAULT_TIMEOUT = float(os.environ.get("ONYXCTL_TIMEOUT", "5"))
 DEFAULT_RETRIES = int(os.environ.get("ONYXCTL_RETRIES", "2"))
 
@@ -65,13 +65,14 @@ class Client:
     def connect(self, wait=0.0):
         deadline = time.monotonic() + wait
         while True:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 s.settimeout(self.timeout)
                 s.connect(self.path)
                 self.sock = s
                 return self
             except OSError as exc:
+                s.close()
                 if time.monotonic() >= deadline:
                     raise Error(f"{self.path}: {exc.strerror or exc}") from None
                 time.sleep(0.1)
@@ -149,8 +150,13 @@ class Client:
             raise Error(f"{exc} ({len(body)} response bytes received)") from None
 
     def request(self, typ, payload=b""):
+        if len(payload) > MAX_BODY:
+            raise Error(f"request body exceeds {MAX_BODY} bytes")
+        retries = 0 if typ in (T_EXEC, T_PUT) else self.retries
         last = None
-        for attempt in range(self.retries + 1):
+        if self.sock is None:
+            self.connect(wait=self.timeout)
+        for attempt in range(retries + 1):
             rid = self.next_id
             self.next_id += 1
             try:
@@ -161,7 +167,7 @@ class Client:
                              f"after {attempt + 1} attempt(s): {exc}")
                 if self.sock:
                     self.close()
-                if attempt < self.retries:
+                if attempt < retries:
                     self.connect(wait=self.timeout)
         raise last
 
@@ -174,6 +180,8 @@ class Client:
         return struct.unpack("<I", body[:4])[0]
 
     def exec(self, argv, timeout=None):
+        if self.sock is None:
+            self.connect(wait=self.timeout)
         old = self.sock.gettimeout()
         if timeout:
             self.sock.settimeout(timeout)
@@ -184,10 +192,11 @@ class Client:
                 payload += struct.pack("<H", len(raw)) + raw
             body = self.request(T_EXEC, payload)
         finally:
-            self.sock.settimeout(old)
+            if self.sock is not None:
+                self.sock.settimeout(old)
         if len(body) < 16:
             raise Error("short exec response")
-        status, ticks, outlen, errlen = struct.unpack("<IIII", body[:16])
+        status, ticks, outlen, errlen = struct.unpack("<iIII", body[:16])
         if 16 + outlen + errlen != len(body):
             raise Error(f"exec response says {outlen}+{errlen} output bytes, "
                         f"got {len(body) - 16}")
@@ -227,7 +236,7 @@ class Client:
         body = self.request(T_STAT, struct.pack("<H", len(raw)) + raw)
         if len(body) < 16:
             raise Error("short stat response")
-        status, typ, mode, size = struct.unpack("<IIII", body[:16])
+        status, typ, mode, size = struct.unpack("<iIII", body[:16])
         if status != 0:
             raise Error(f"{path}: no such file")
         return typ, mode, size
@@ -274,6 +283,7 @@ def cmd_exec(client, args):
         print(f"exec: {len(argv)} arguments, the agent accepts at most 32",
               file=sys.stderr)
         return 2
+    status, ticks, out, err = client.exec(argv, timeout=args.exec_timeout)
     sys.stdout.buffer.write(out)
     sys.stdout.buffer.flush()
     sys.stderr.buffer.write(err)
@@ -410,7 +420,7 @@ def main(argv=None):
     sub.add_parser("ping", help="check that the agent answers")
 
     p = sub.add_parser("exec", help="run a program, return its output")
-    p.add_argument("--timeout", type=float, default=30.0)
+    p.add_argument("--timeout", type=float, dest="exec_timeout", default=30.0)
     p.add_argument("argv", nargs=argparse.REMAINDER)
 
     p = sub.add_parser("put", help="upload a host file ('-' reads stdin)")

@@ -48,7 +48,7 @@ class Guest:
         self.log_path = log_path
         self.log = open(log_path, "wb")
         self.proc = subprocess.Popen(
-            ["make", "dev", f"DEVSOCKET={socket_path}", "CPUS=1"],
+            ["make", "dev", f"DEVSOCKET={socket_path}", "CPUS=" + os.environ.get("CPUS", "1")],
             stdin=subprocess.DEVNULL, stdout=self.log,
             stderr=subprocess.STDOUT, start_new_session=True)
 
@@ -163,6 +163,21 @@ def main():
                 f"stat: type={typ} mode=0o{mode:04o} size={size}")
         ok("transfer", f"{len(data)} bytes sha256={digest[:16]}")
 
+        try:
+            client.put("/tmp/over", bytes(onyxctl.MAX_BODY))
+        except onyxctl.Error:
+            pass
+        else:
+            raise RuntimeError("oversized upload succeeded")
+        if client.ping() != version:
+            raise RuntimeError("agent unavailable after oversized upload")
+        data = b"x" * 40000
+        client.put("/tmp/long-output", data)
+        status, _, out, err = client.exec(["cat", "/tmp/long-output"])
+        if status or out != data[:32768] or err:
+            raise RuntimeError("long stdout prefix was lost")
+        ok("limits", "oversized upload refused, 32 KiB stdout preserved")
+
         typ, mode, _ = client.stat("/dev/agent")
         if typ != onyxctl.TYPE_DEVICE or mode != 0o600:
             raise RuntimeError(
@@ -193,6 +208,13 @@ def main():
             raise RuntimeError(
                 f"missing program: status={status} stderr={err!r}")
         ok("exec-failure", "status=127 preserved")
+        client.close()
+        cli = subprocess.run([sys.executable, "tools/onyxctl.py", "--socket",
+                              socket_path, "exec", "echo", "cli"],
+                             capture_output=True, timeout=15)
+        if cli.returncode or cli.stdout != b"cli\n":
+            raise RuntimeError(f"onyxctl exec failed: {cli.stderr!r}")
+        ok("cli-exec", "stdout and exit status preserved")
 
     finally:
         if client:
@@ -202,7 +224,7 @@ def main():
         else:
             guest.stop()
             stopped[0] = guest.proc.poll() is not None
-        shutil.rmtree(directory, ignore_errors=True)
+            shutil.rmtree(directory, ignore_errors=True)
 
     if not args.keep and not stopped[0]:
         raise RuntimeError("qemu process group did not exit")

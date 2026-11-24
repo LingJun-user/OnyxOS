@@ -157,10 +157,12 @@ slurp(char *path, char **out, int cap)
 
   if ((f = open(path, O_RDONLY)) < 0)
     return -1;
-  if (fstat(f, &st) < 0 || st.size > cap) {
+  if (fstat(f, &st) < 0) {
     close(f);
     return -1;
   }
+  if (st.size > cap)
+    st.size = cap;
   buf = malloc(st.size + 1);
   if (buf == 0) {
     close(f);
@@ -177,24 +179,10 @@ slurp(char *path, char **out, int cap)
   return got;
 }
 
-static char *
-numcat(char *p, uint v)
-{
-  char tmp[12];
-  int n = 0;
-
-  do {
-    tmp[n++] = '0' + v % 10;
-  } while ((v /= 10) != 0);
-  while (n > 0)
-    *p++ = tmp[--n];
-  return p;
-}
-
 static void
 do_exec(uint32 id, uchar *p, int len)
 {
-  static char errname[40], outname[40];
+  char *errname = "/dev/ag-output/stderr", *outname = "/dev/ag-output/stdout";
   static char argstore[1024];
   char *argv[ARGMAX + 1];
   char fallback[64];
@@ -229,35 +217,12 @@ do_exec(uint32 id, uchar *p, int len)
   }
   argv[argc] = 0;
 
-  outname[0] = 0;
-  {
-    char *q = errname;
-    char *s = "/tmp/ag.";
-    while (*s)
-      *q++ = *s++;
-    q = numcat(q, getpid());
-    *q++ = '.';
-    q = numcat(q, id);
-    s = ".err";
-    while (*s)
-      *q++ = *s++;
-    *q = 0;
-  }
-  memmove(outname, errname, sizeof(outname));
-  outname[strlen(outname) - 4] = 0;
-  {
-    char *q = outname + strlen(outname);
-    char *s = ".out";
-    while (*s)
-      *q++ = *s++;
-    *q = 0;
-  }
-
   t0 = uptime();
   pid = fork();
   if (pid < 0)
     goto fail;
   if (pid == 0) {
+    close(fd);
     close(1);
     if (open(outname, O_CREATE | O_TRUNC | O_WRONLY) < 0)
       exit(126);
@@ -282,7 +247,8 @@ do_exec(uint32 id, uchar *p, int len)
   ticks = uptime() - t0;
 
   outlen = slurp(outname, &out, OUTMAX);
-  errlen = slurp(errname, &err, OUTMAX);
+  errlen = slurp(errname, &err,
+                 REQMAX - 16 - outlen < OUTMAX ? REQMAX - 16 - outlen : OUTMAX);
   if (outlen < 0)
     outlen = 0;
   if (errlen < 0)
@@ -291,8 +257,13 @@ do_exec(uint32 id, uchar *p, int len)
   unlink(errname);
 
   resp = malloc(16 + outlen + errlen);
-  if (resp == 0)
+  if (resp == 0) {
+    if (out)
+      free(out);
+    if (err)
+      free(err);
     goto fail;
+  }
   put32(resp, st);
   put32(resp + 4, ticks);
   put32(resp + 8, outlen);
@@ -388,7 +359,7 @@ do_get(uint32 id, uchar *p, int len)
   f = open(path, O_RDONLY);
   if (f < 0)
     goto fail;
-  if (fstat(f, &st) < 0 || st.size > REQMAX) {
+  if (fstat(f, &st) < 0 || st.size > REQMAX - 8) {
     close(f);
     goto fail;
   }
@@ -542,35 +513,48 @@ int
 main(void)
 {
   uchar hdr[HDRSZ];
-  int assembling = 0, type = 0;
+  int assembling = 0, dropping = 0, type = 0;
   uint32 id = 0;
 
   fd = open("/dev/agent", O_RDWR);
   if (fd < 0)
     exit(1);
   mkdir("/tmp");
+  mkdir("/dev/ag-output");
+  if (chmod("/dev/ag-output", 0700) < 0)
+    exit(1);
 
   for (;;) {
     if (read_header(hdr) < 0)
       exit(0);
-    type = hdr[4];
+    int frame_type = hdr[4];
     int flags = hdr[5];
     int len = get16(hdr + 6);
     uint32 rid = get32(hdr + 8);
 
-    if (len > MAXPAYLOAD)
-      exit(2);
-    if (!assembling) {
-      reqlen = 0;
-      id = rid;
+    if (len > MAXPAYLOAD) {
+      assembling = 0;
+      continue;
     }
-    if (reqlen + len > REQMAX)
-      exit(3);
-    if (len && read_full(req + reqlen, len) < 0)
-      exit(0);
-    reqlen += len;
+    if (!assembling || rid != id || frame_type != type) {
+      reqlen = 0;
+      dropping = 0;
+      id = rid;
+      type = frame_type;
+    }
+    if ((flags & ~F_MORE) || reqlen + len > REQMAX)
+      dropping = 1;
+    if (dropping) {
+      static uchar discard[MAXPAYLOAD];
+      if (read_full(discard, len) < 0)
+        exit(0);
+    } else {
+      if (read_full(req + reqlen, len) < 0)
+        exit(0);
+      reqlen += len;
+    }
     assembling = (flags & F_MORE) != 0;
-    if (!assembling) {
+    if (!assembling && !dropping) {
       dispatch(type, id, (uchar *)req, reqlen);
       reqlen = 0;
     }

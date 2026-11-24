@@ -584,7 +584,7 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 | `kernel/file.h` | `AGENT` 主设备号 2 |
 | `user/agent.c` | 帧协议、`ping`/`exec`/`put`/`get`/`stat`/`klog`、分片与重同步 |
 | `user/init.c` | 启动时创建 `/dev`、`/dev/agent`，`chmod 0600`，fork/exec `agent` |
-| `Makefile` | `make dev`（`DEVSOCKET`，默认 `/tmp/onyx-dev.sock`）、`make dev-reload`、`devlink-test`、`UPROGS`/`OBJS` |
+| `Makefile` | `make dev`（`DEVSOCKET`，默认 `~/.onyx-dev/dev.sock`）、`make dev-reload`、`devlink-test`、`UPROGS`/`OBJS` |
 | `tools/onyxctl.py` | 仅标准库的宿主客户端与 CLI，含 `watch` 热重载 |
 | `test-devlink.py` | 端到端测试：自己启动 `make dev`，临时 socket，结束时杀掉整个进程组 |
 | `.github/workflows/test.yml` | 单核/三核 Linux job 增加 `python3 test-devlink.py` |
@@ -604,7 +604,7 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 
 单次请求/响应上限 64 KiB，两个方向都支持分片。`exec` 的负载是 `argc` 加逐个长度前缀的参数；`put` 是路径、模式和文件内容；`get`/`stat` 只带路径；`klog` 带 seq 游标。`exec` 先按原样 `exec`，失败后再试 `/<name>`，与 Shell 的命令查找保持一致；引号、管道和变量展开由调用者自己拆分。
 
-`exec` 的实现按计划的第一版：子进程把 stdout/stderr 重定向到 `/tmp/ag.<pid>.<id>.out|err`，退出后回传并删除，单路输出上限 32 KiB。没有做流式输出。
+`exec` 的实现按计划的第一版：子进程把 stdout/stderr 重定向到 `/dev/ag-output/stdout 和 /dev/ag-output/stderr`，退出后回传并删除，单路输出上限 32 KiB。没有做流式输出。
 
 **关键取舍与计划文字的差异**
 
@@ -612,7 +612,7 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 2. 不协商 `VIRTIO_CONSOLE_F_MULTIPORT`、`F_SIZE`、`F_EMERG_WRITE`，只接受 `VIRTIO_F_VERSION_1`（若设备提供）。没有控制队列。
 3. **接收 FIFO 定为 128 KiB，而不是几 KiB**。virtio-serial 没有流控：QEMU 只要还有已投递的描述符就继续写，FIFO 满后只能丢字节，而丢字节会让帧失步。单次请求上限 64 KiB，128 KiB 留出一倍余量；这个大小是协议契约的一部分，不是可随手调小的参数。
 4. **agent 在失步时重同步而不是退出**：宿主超时重试会重连并重发，客户机可能正停在旧帧的负载中间；按字节滑动直到帧头 magic 匹配，最多浪费一次请求，不会把整个调试通道打死。
-5. **宿主侧的失败诊断**：每个请求都有超时、重试上限和独立 id；重连后继续用新 id 重发。超时或断链时错误信息包含请求 id、尝试次数、帧内已收字节数和响应体已收字节数，便于区分“agent 没起来”“帧被截断”和“传到一半断链”。`klog` 支持 `--cursor-file` 与 `--follow`，游标按返回的 seq 写回文件，跨调用增量拉取；`put -` 从 stdin 读，`get -` 写 stdout；`watch` 可监视目录或单个 `.c` 文件。
+5. **宿主侧的失败诊断**：每个请求都有超时和独立 id；只读请求可在重连后用新 id 重发，exec 和 put 只发送一次。超时或断链时错误信息包含请求 id、尝试次数、帧内已收字节数和响应体已收字节数，便于区分“agent 没起来”“帧被截断”和“传到一半断链”。`klog` 支持 `--cursor-file` 与 `--follow`，游标按返回的 seq 写回文件，跨调用增量拉取；`put -` 从 stdin 读，`get -` 写 stdout；`watch` 可监视目录或单个 `.c` 文件。
 6. 没有新增系统调用：`exec`/文件操作复用既有调用，`klog` 复用 `klog()`，权限仍由 `/dev/agent` 的 0600 节点和既有文件权限检查决定。
 6. `check` 这一类“检查器”不修改状态的原则同样适用：驱动只在初始化和收发路径写设备寄存器与自己的队列，不碰文件系统。
 
@@ -644,5 +644,5 @@ trace: 4 3 enter open("/no/such/file",0,1ac8)
 - 单次请求/响应上限 64 KiB，`exec` 单路输出上限 32 KiB；超过上限的文件传输和输出会被拒绝或截断（`get` 拒绝，`exec` 截断）。
 - 接收 FIFO 满时丢弃字节并计数；协议失步后 agent 会重同步，但这次请求会失败。
 - 不使用 multiport，因此只有一个端口；`dev` 设备只在 `make dev` 下存在。
-- `exec` 依赖客户机 `/tmp` 可写（agent 启动时创建）；磁盘满时 exec 会以 127 或 126 失败并返回 stderr。
+- `exec` 依赖客户机 `/dev/ag-output` 可写（agent 启动时创建）；磁盘满时 exec 会以 127 或 126 失败并返回 stderr。
 - 热重载监视的是 `user/*.c` 的修改时间；`watch` 串行执行，保存后需要等当前这次运行结束才会处理下一次修改。

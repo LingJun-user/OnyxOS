@@ -161,11 +161,11 @@ make dev-reload                                  # 另开终端：保存 user/*.
 
 DevLink 说明：
 
-- `make dev` 只在 `make qemu` 的基础上追加一个 virtio-serial 设备（槽 1、IRQ 2）和一个宿主 UNIX socket（`DEVSOCKET`，默认 `/tmp/onyx-dev.sock`）。普通 `make qemu` 不加载设备，`/dev/agent` 的读取直接失败，`agent` 进程随即退出。
+- `make dev` 只在 `make qemu` 的基础上追加一个 virtio-serial 设备（槽 1、IRQ 2）和一个宿主 UNIX socket（`DEVSOCKET`，默认 `~/.onyx-dev/dev.sock`）。普通 `make qemu` 不加载设备，`/dev/agent` 的读取直接失败，`agent` 进程随即退出。
 - 设备节点由 `init` 在每次启动时创建并 `chmod 0600`；只有 root 能打开。宿主 socket 位于临时路径，属于本机开发接口：**没有认证，不要暴露给不可信用户或转发到网络**。
 - 协议为 12 字节帧头（magic/type/flags/length/id）加负载，单帧 4 KiB，单次请求/响应上限 64 KiB，支持分片；`exec` 不经过 shell，引号与管道由调用者自行拆分。
-- `exec` 把 stdout/stderr 重定向到客户机 `/tmp` 临时文件，退出后回传并删除；单路输出最多 32 KiB。
-- `onyxctl.py` 的每个请求都有超时、重试和请求 id；失败时报告请求 id 与已收字节数，不无限等待。`klog --cursor-file FILE --follow` 按 seq 游标增量拉日志；`put -`/`get -` 走 stdin/stdout；`watch` 可以监视整个目录或单个 `.c` 文件。
+- `exec` 把 stdout/stderr 重定向到客户机 root 私有目录 `/dev/ag-output` 内的临时文件，退出后回传并删除；单路输出最多 32 KiB。
+- `onyxctl.py` 的每个请求都有超时和请求 id，只读请求允许重试；失败时报告请求 id 与已收字节数，不无限等待。`klog --cursor-file FILE --follow` 按 seq 游标增量拉日志；`put -`/`get -` 走 stdin/stdout；`watch` 可以监视整个目录或单个 `.c` 文件。
 
 `put` 的边界：
 

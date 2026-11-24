@@ -222,16 +222,23 @@ qemu: check-qemu-version $K/kernel fs.img
 # wired to a UNIX socket the host tools connect to.  The socket lives in a
 # temporary path and is removed by QEMU on exit; plain `make qemu' loads no
 # device at all, so the default path is unchanged.
-DEVSOCKET ?= /tmp/onyx-dev.sock
-dev: QEMUEXTRA += -chardev socket,id=devlink,path=$(DEVSOCKET),server=on,wait=off
+ifndef DEVSOCKET
+DEVSOCKET := $(HOME)/.onyx-dev/dev.sock
+dev: dev-socket-dir
+.PHONY: dev-socket-dir
+dev-socket-dir:
+	@mkdir -p -m 700 "$(HOME)/.onyx-dev" && chmod 700 "$(HOME)/.onyx-dev"
+endif
+dev: QEMUEXTRA += -chardev socket,id=devlink,path="$(DEVSOCKET)",server=on,wait=off
 dev: QEMUEXTRA += -device virtio-serial-device,bus=virtio-mmio-bus.1
 dev: QEMUEXTRA += -device virtconsole,chardev=devlink,name=agent
-dev: qemu
+dev: check-qemu-version $K/kernel fs.img
+	@umask 077 && $(QEMU) $(QEMUOPTS)
 
 # Rebuild user programs on save and run them through the same session.
 # Needs a running `make dev' in another terminal.
 dev-reload:
-	@python3 tools/onyxctl.py --socket $(DEVSOCKET) watch $${WATCH:-user}
+	@python3 tools/onyxctl.py --socket "$(DEVSOCKET)" watch $${WATCH:-user}
 
 # End-to-end DevLink test: boots its own `make dev' with a private socket.
 devlink-test: check-qemu-version $K/kernel fs.img

@@ -183,11 +183,18 @@ virtio_console_init(void)
   // VIRTIO_F_VERSION_1 is bit 32, i.e. bit 0 of the high word.  Decline
   // every console feature: no multiport (we have exactly one port), no
   // size reports and no emergency write.
+  *R(VIRTIO_MMIO_DEVICE_FEATURES_SEL) = 0;
   devlo = *R(VIRTIO_MMIO_DEVICE_FEATURES);
-  devhi = *R(VIRTIO_MMIO_DEVICE_FEATURES_HI);
+  *R(VIRTIO_MMIO_DEVICE_FEATURES_SEL) = 1;
+  devhi = *R(VIRTIO_MMIO_DEVICE_FEATURES);
+  if (!(devhi & 1)) {
+    dev.present = 0;
+    return;
+  }
+  *R(VIRTIO_MMIO_DRIVER_FEATURES_SEL) = 0;
   *R(VIRTIO_MMIO_DRIVER_FEATURES) = 0;
-  *R(VIRTIO_MMIO_DRIVER_FEATURES_HI) = (devhi & 1) ? 1 : 0;
-  (void)devlo;
+  *R(VIRTIO_MMIO_DRIVER_FEATURES_SEL) = 1;
+  *R(VIRTIO_MMIO_DRIVER_FEATURES) = 1;
 
   *R(VIRTIO_MMIO_STATUS) = status |= VIRTIO_CONFIG_S_FEATURES_OK;
   status = *R(VIRTIO_MMIO_STATUS);
@@ -340,6 +347,7 @@ agentwrite(int user_src, uint64 src, int n)
       acquire(&dev.lock);
       dev.free[idx] = 1;
       release(&dev.lock);
+      wakeup(&dev.free[0]);
       return total > 0 ? total : -1;
     }
 
